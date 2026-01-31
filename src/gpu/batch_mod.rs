@@ -5,7 +5,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use tracing::{info, warn};
+use tracing::info;
 use wgpu::{
     self, BackendOptions, Backends, BufferDescriptor, BufferUsages, ComputePassDescriptor,
     DeviceDescriptor, InstanceDescriptor, InstanceFlags, MapMode, MemoryBudgetThresholds,

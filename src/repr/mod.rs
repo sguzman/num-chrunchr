@@ -1,5 +1,7 @@
 use crate::config::StreamConfig;
+mod bigint_ram;
 use anyhow::{Context, Result};
+pub use bigint_ram::BigIntRam;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};

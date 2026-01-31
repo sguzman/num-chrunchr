@@ -100,6 +100,7 @@ pub struct PoliciesConfig {
     pub max_modulus: Option<u64>,
     pub max_divisor: Option<u32>,
     pub max_divisions: usize,
+    pub bigint_upgrade_digits: usize,
 }
 
 impl Default for PoliciesConfig {
@@ -108,6 +109,7 @@ impl Default for PoliciesConfig {
             max_modulus: None,
             max_divisor: None,
             max_divisions: 64,
+            bigint_upgrade_digits: 128,
         }
     }
 }
@@ -149,6 +151,7 @@ mod tests {
         let cfg = Config::load(Some(&missing_path)).unwrap();
         assert_eq!(cfg.analysis.leading_digits, 32);
         assert_eq!(cfg.stream.buffer_size, DEFAULT_BUFFER_SIZE);
+        assert_eq!(cfg.policies.bigint_upgrade_digits, 128);
     }
 
     #[test]
@@ -169,6 +172,7 @@ mod tests {
             max_modulus = 9999
             max_divisor = 7
             max_divisions = 3
+            bigint_upgrade_digits = 256
             [strategy]
             primes_limit = 30
             report_directory = "reports/artifacts"
@@ -185,6 +189,7 @@ mod tests {
         assert_eq!(cfg.policies.max_modulus, Some(9999));
         assert_eq!(cfg.policies.max_divisor, Some(7));
         assert_eq!(cfg.policies.max_divisions, 3);
+        assert_eq!(cfg.policies.bigint_upgrade_digits, 256);
         assert_eq!(cfg.strategy.primes_limit, 30);
         assert_eq!(
             cfg.strategy.report_directory,

@@ -12,9 +12,10 @@ leading_digits = 32
 max_modulus = 1000000000
 max_divisor = 1000
 max_divisions = 32
+bigint_upgrade_digits = 128
 
 [strategy]
-primes_limit = 10000
+primes_limit = 1000000
 report_directory = "reports"
 sketch_primes = [2, 3, 5, 7, 11, 13, 17, 19]
 batch_size = 256
