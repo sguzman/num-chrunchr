@@ -7,9 +7,10 @@ use std::sync::{
 };
 use tracing::{info, warn};
 use wgpu::{
-    self, BackendOptions, Backends, ComputePassDescriptor, DeviceDescriptor, InstanceDescriptor,
-    InstanceFlags, MemoryBudgetThresholds, PipelineCompilationOptions, PipelineLayoutDescriptor,
-    PollType, RequestAdapterOptions, Trace, util::DeviceExt,
+    self, BackendOptions, Backends, BufferDescriptor, BufferUsages, ComputePassDescriptor,
+    DeviceDescriptor, InstanceDescriptor, InstanceFlags, MapMode, MemoryBudgetThresholds,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PollType, RequestAdapterOptions, Trace,
+    util::DeviceExt,
 };
 
 const WORKGROUP_SIZE: u32 = 64;
@@ -247,9 +248,7 @@ impl GpuBatchModEngine {
         let primes_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("primes buffer"),
             contents: bytemuck::cast_slice(&entries),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
         Ok(Self {
@@ -325,12 +324,33 @@ impl GpuBatchModEngine {
     }
 
     pub fn remainders(&self) -> Result<Vec<u32>> {
-        let slice = self.primes_buffer.slice(..);
+        let readback_buffer = self.device.create_buffer(&BufferDescriptor {
+            label: Some("primes readback buffer"),
+            size: self.primes_buffer.size(),
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("primes readback encoder"),
+            });
+        encoder.copy_buffer_to_buffer(
+            &self.primes_buffer,
+            0,
+            &readback_buffer,
+            0,
+            self.primes_buffer.size(),
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = readback_buffer.slice(..);
         let ready = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
         let ready_clone = ready.clone();
         let error_clone = error.clone();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
+        slice.map_async(MapMode::Read, move |res| {
             if let Err(err) = res {
                 *error_clone.lock().unwrap() = Some(err);
             }
@@ -346,9 +366,12 @@ impl GpuBatchModEngine {
         }
 
         let data = slice.get_mapped_range();
-        let entries = bytemuck::cast_slice::<u8, PrimeEntry>(&data);
-        let remainders = entries.iter().map(|entry| entry.remainder).collect();
-        self.primes_buffer.unmap();
+        let remainders = bytemuck::cast_slice::<u8, PrimeEntry>(&data)
+            .iter()
+            .map(|entry| entry.remainder)
+            .collect();
+        drop(data);
+        readback_buffer.unmap();
         Ok(remainders)
     }
 }

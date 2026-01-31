@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{
     env, fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 use tracing::warn;
@@ -139,6 +138,7 @@ impl Config {
 mod tests {
     use super::*;
     use std::fs::File;
+    use std::io::Write;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
