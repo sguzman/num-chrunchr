@@ -1174,6 +1174,8 @@ Phase 3: ECM and heavier tools
 
     later: QS/NFS via wrappers
 
+    ✅ Lenstra ECM (via the `ecm` crate) is now called automatically after the RAM upgrade when Pollard/p±1 stall; tune it through `[policies.ecm]`.
+
 Phase 4: GPU acceleration
 
 Primary GPU target: batch remainder scanning:

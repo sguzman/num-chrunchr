@@ -192,6 +192,7 @@ The next peel invocation will detect these files and resume from the last known 
 
 - `logging` / `stream` / `analysis` segments we already mention.
 - `policies` (modulus/divisor limits, division budget).
+- `policies.ecm` (enable/disable ECM, adjust stage 1/2 bounds, curve budget, and RNG seed for the Lenstra fallback that runs after the RAM upgrade when Pollard/p±1 stall).
 - `strategy` — `primes_limit`, `batch_size`, `report_directory`, `sketch_primes`, and `use_gpu` control how aggressively `peel` sieves, how many primes are grouped for each batch scan, where state is persisted, and whether the GPU-backed batch modulo kernel is engaged.
 
 ### GPU acceleration
@@ -411,6 +412,8 @@ MVP stage:
     🔜 expression/AST compressed representations
 
     🔜 limb files + GPU batch remainder scanning
+
+Phase 3 now includes Lenstra’s ECM via the `ecm` crate, with `[policies.ecm]` letting you toggle the fallback, adjust the stage 1/2 bounds, curve budget, and RNG seed that the RAM upgrade uses when Pollard/p±1 are stuck.
 
 FAQ
 Why not just store everything as a BigInt?

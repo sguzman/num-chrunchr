@@ -13,6 +13,12 @@ max_modulus = 1000000000
 max_divisor = 1000
 max_divisions = 32
 bigint_upgrade_digits = 128
+[policies.ecm]
+enabled = true
+b1 = 5000
+b2 = 100000
+max_curve = 256
+seed = 1234
 
 [strategy]
 primes_limit = 1000000

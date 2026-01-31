@@ -101,6 +101,7 @@ pub struct PoliciesConfig {
     pub max_divisor: Option<u32>,
     pub max_divisions: usize,
     pub bigint_upgrade_digits: usize,
+    pub ecm: EcmConfig,
 }
 
 impl Default for PoliciesConfig {
@@ -110,6 +111,29 @@ impl Default for PoliciesConfig {
             max_divisor: None,
             max_divisions: 64,
             bigint_upgrade_digits: 128,
+            ecm: EcmConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct EcmConfig {
+    pub enabled: bool,
+    pub b1: usize,
+    pub b2: usize,
+    pub max_curve: usize,
+    pub seed: usize,
+}
+
+impl Default for EcmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            b1: 5000,
+            b2: 100_000,
+            max_curve: 256,
+            seed: 1234,
         }
     }
 }
@@ -152,6 +176,11 @@ mod tests {
         assert_eq!(cfg.analysis.leading_digits, 32);
         assert_eq!(cfg.stream.buffer_size, DEFAULT_BUFFER_SIZE);
         assert_eq!(cfg.policies.bigint_upgrade_digits, 128);
+        assert!(cfg.policies.ecm.enabled);
+        assert_eq!(cfg.policies.ecm.b1, 5000);
+        assert_eq!(cfg.policies.ecm.b2, 100_000);
+        assert_eq!(cfg.policies.ecm.max_curve, 256);
+        assert_eq!(cfg.policies.ecm.seed, 1234);
     }
 
     #[test]
@@ -173,6 +202,12 @@ mod tests {
             max_divisor = 7
             max_divisions = 3
             bigint_upgrade_digits = 256
+            [policies.ecm]
+            enabled = false
+            b1 = 128
+            b2 = 1024
+            max_curve = 32
+            seed = 555
             [strategy]
             primes_limit = 30
             report_directory = "reports/artifacts"
@@ -190,6 +225,11 @@ mod tests {
         assert_eq!(cfg.policies.max_divisor, Some(7));
         assert_eq!(cfg.policies.max_divisions, 3);
         assert_eq!(cfg.policies.bigint_upgrade_digits, 256);
+        assert!(!cfg.policies.ecm.enabled);
+        assert_eq!(cfg.policies.ecm.b1, 128);
+        assert_eq!(cfg.policies.ecm.b2, 1024);
+        assert_eq!(cfg.policies.ecm.max_curve, 32);
+        assert_eq!(cfg.policies.ecm.seed, 555);
         assert_eq!(cfg.strategy.primes_limit, 30);
         assert_eq!(
             cfg.strategy.report_directory,

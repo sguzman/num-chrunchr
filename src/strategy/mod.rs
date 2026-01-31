@@ -7,17 +7,19 @@ use crate::{
     source::NumberSource,
 };
 use anyhow::{Context, Result, anyhow, bail};
+use ecm::ecm_with_params;
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
 use rand::{Rng, SeedableRng, rng, rngs::StdRng};
 use report::StructureReport;
+use rug::Integer as RugInteger;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{BufReader, Read},
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{debug, info, warn};
 
@@ -250,16 +252,17 @@ fn build_sketch(path: &Path, buffer_size: usize, primes: &[u64]) -> Result<Sketc
     })
 }
 
-fn factor_bigint(value: BigUint, report: &mut FactorReport) -> Result<BigUint> {
+fn factor_bigint(value: BigUint, report: &mut FactorReport, config: &Config) -> Result<BigUint> {
     let mut seed_source = rng();
     let mut rng = StdRng::from_rng(&mut seed_source);
-    factor_bigint_with_rng(value, report, &mut rng)
+    factor_bigint_with_rng(value, report, &mut rng, config)
 }
 
 fn factor_bigint_with_rng(
     mut value: BigUint,
     report: &mut FactorReport,
     rng: &mut StdRng,
+    config: &Config,
 ) -> Result<BigUint> {
     let one = BigUint::one();
 
@@ -269,10 +272,23 @@ fn factor_bigint_with_rng(
             return Ok(one);
         }
 
-        let factor = pollard_rho(&value, rng)
+        let factor = match pollard_rho(&value, rng)
             .or_else(|| pollard_p_minus_one(&value, 512))
             .or_else(|| pollard_p_plus_one(&value, 512))
-            .ok_or_else(|| anyhow!("failed to find a non-trivial factor"))?;
+        {
+            Some(factor) => factor,
+            None => {
+                if let Some(factors) = run_ecm_factorization(&value, config)? {
+                    for (prime, exponent) in factors {
+                        for _ in 0..exponent {
+                            report.record(prime.clone());
+                        }
+                    }
+                    return Ok(one);
+                }
+                bail!("failed to find a non-trivial factor");
+            }
+        };
 
         if &factor == &value {
             anyhow::bail!("stuck factoring {} (found trivial factor)", value);
@@ -285,6 +301,64 @@ fn factor_bigint_with_rng(
     }
 
     Ok(value)
+}
+
+fn run_ecm_factorization(
+    value: &BigUint,
+    config: &Config,
+) -> Result<Option<Vec<(BigUint, usize)>>> {
+    let params = &config.policies.ecm;
+    if !params.enabled {
+        return Ok(None);
+    }
+
+    let integer = biguint_to_rug(value)?;
+    let start = Instant::now();
+    let result = ecm_with_params(
+        &integer,
+        params.b1,
+        params.b2,
+        params.max_curve,
+        params.seed,
+    );
+
+    match result {
+        Ok(factors) if !factors.is_empty() => {
+            let duration = start.elapsed();
+            let converted = factors
+                .into_iter()
+                .map(|(factor, exponent)| {
+                    let bigint = rug_to_biguint(&factor)?;
+                    Ok((bigint, exponent))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            info!(
+                duration_ms = duration.as_secs_f64() * 1000.0,
+                params = ?params,
+                factors = ?converted,
+                "ECM finished factoring the remaining cofactor"
+            );
+            Ok(Some(converted))
+        }
+        Ok(_) => {
+            info!(params = ?params, "ECM did not find additional factors");
+            Ok(None)
+        }
+        Err(err) => {
+            warn!(?err, params = ?params, "ECM failed to factor the remainder");
+            Ok(None)
+        }
+    }
+}
+
+fn biguint_to_rug(value: &BigUint) -> Result<RugInteger> {
+    RugInteger::from_str_radix(&value.to_str_radix(10), 10)
+        .map_err(|err| anyhow!("convert {} to rug::Integer: {}", value, err))
+}
+
+fn rug_to_biguint(value: &RugInteger) -> Result<BigUint> {
+    BigUint::parse_bytes(value.to_string().as_bytes(), 10)
+        .ok_or_else(|| anyhow!("convert {} to BigUint", value))
 }
 
 fn is_probable_prime(n: &BigUint, rng: &mut StdRng, rounds: usize) -> bool {
@@ -434,7 +508,7 @@ fn try_bigint_upgrade(
     );
 
     let bigint = BigIntRam::from_decimal_stream(cofactor_path, config.stream.buffer_size)?;
-    let remaining = factor_bigint(bigint.as_biguint().clone(), report)?;
+    let remaining = factor_bigint(bigint.as_biguint().clone(), report, config)?;
     fs::write(cofactor_path, remaining.to_string())
         .with_context(|| format!("write upgraded cofactor {}", cofactor_path.display()))?;
     report.save(factors_path)?;
@@ -568,14 +642,46 @@ mod tests {
     fn factor_bigint_records_large_primes() {
         let mut report = FactorReport::new("bigint".into());
         let mut rng = StdRng::seed_from_u64(123);
+        let cfg = Config::default();
         let remaining =
-            factor_bigint_with_rng(BigUint::from(8051u32), &mut report, &mut rng).unwrap();
+            factor_bigint_with_rng(BigUint::from(8051u32), &mut report, &mut rng, &cfg).unwrap();
         assert!(remaining.is_one());
         assert!(
             report
                 .factors
                 .iter()
                 .any(|entry| entry.prime == "83" || entry.prime == "97")
+        );
+    }
+
+    #[test]
+    fn ecm_factorization_returns_primes() {
+        let cfg = Config::default();
+        let factors = run_ecm_factorization(&BigUint::from(8051u32), &cfg).unwrap();
+        assert!(factors.is_some());
+        let factors = factors.unwrap();
+        assert!(
+            factors
+                .iter()
+                .any(|(prime, _)| prime == &BigUint::from(83u32)),
+            "missing 83"
+        );
+        assert!(
+            factors
+                .iter()
+                .any(|(prime, _)| prime == &BigUint::from(97u32)),
+            "missing 97"
+        );
+    }
+
+    #[test]
+    fn ecm_is_skipped_when_disabled() {
+        let mut cfg = Config::default();
+        cfg.policies.ecm.enabled = false;
+        assert!(
+            run_ecm_factorization(&BigUint::from(8051u32), &cfg)
+                .unwrap()
+                .is_none()
         );
     }
 }
