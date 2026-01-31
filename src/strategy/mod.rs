@@ -1,3 +1,5 @@
+mod report;
+
 use crate::{
     config::Config,
     gpu::batch_mod::BatchModEngine,
@@ -8,8 +10,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use num_bigint::BigUint;
 use num_integer::Integer;
 use num_traits::{One, Zero};
-use rand::{SeedableRng, rng, rngs::StdRng};
-use rand_core::Rng;
+use rand::{Rng, SeedableRng, rng, rngs::StdRng};
+use report::StructureReport;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -150,11 +152,15 @@ pub fn run_peel(
         &strategy.sketch_primes,
     )?;
     sketch.save(&sketch_path)?;
+    let structure_report = StructureReport::build(&cofactor_path, config)?;
+    let structure_path = report_dir.join("structure.json");
+    structure_report.save(&structure_path)?;
     info!(
         report = %factors_path.display(),
         sketch = %sketch_path.display(),
         "peel finished"
     );
+    info!(structure = %structure_path.display(), "structure report saved");
 
     Ok(())
 }

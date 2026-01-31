@@ -713,7 +713,6 @@ dependencies = [
  "num-traits",
  "pollster",
  "rand",
- "rand_core",
  "serde",
  "serde_json",
  "tempfile",
