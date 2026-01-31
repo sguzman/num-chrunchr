@@ -1,0 +1,14 @@
+[logging]
+level = "info"
+time_format = "rfc3339"
+
+[stream]
+buffer_size = 65536
+
+[analysis]
+leading_digits = 32
+
+[policies]
+max_modulus = 1000000000
+max_divisor = 1000
+max_divisions = 32

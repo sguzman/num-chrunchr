@@ -1,3 +1,130 @@
-fn main() {
-    println!("Hello, world!");
+mod config;
+mod repr;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use config::{Config, LoggingConfig};
+use repr::DecimalStream;
+use std::{path::PathBuf, time::Instant};
+use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
+
+#[derive(Parser)]
+#[command(name = "num-chrunchr")]
+#[command(about = "Streaming factoring + number structure toolkit", long_about = None)]
+struct Cli {
+    /// Path to configuration TOML (defaults to config/default.toml)
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Decimal file containing digits of the number
+    #[arg(long)]
+    input: PathBuf,
+
+    #[command(subcommand)]
+    cmd: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Compute N mod p using streaming Horner
+    Mod {
+        #[arg(long)]
+        p: u64,
+    },
+    /// Divide N by a small divisor and emit quotient digits
+    Div {
+        #[arg(long)]
+        d: u32,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Analyze the number (decimal length + leading digits)
+    Analyze {
+        #[arg(long)]
+        leading: Option<usize>,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let config = Config::load(cli.config.as_deref())?;
+    init_logging(&config.logging)?;
+    info!(
+        buffer_size = config.stream.buffer_size,
+        leading_digits = config.analysis.leading_digits,
+        "configuration instantiated"
+    );
+
+    info!(input = %cli.input.display(), command = ?cli.cmd, "processing request");
+    let start = Instant::now();
+    let stream = DecimalStream::from_config(&cli.input, &config.stream)
+        .with_context(|| format!("open input {}", cli.input.display()))?;
+
+    match cli.cmd {
+        Command::Mod { p } => run_mod(&stream, p, &config.policies)?,
+        Command::Div { d, out } => run_div(&stream, d, &out, &config.policies)?,
+        Command::Analyze { leading } => run_analyze(&stream, leading, &config.analysis)?,
+    }
+
+    let duration = start.elapsed();
+    info!(duration_ms = duration.as_secs_f64() * 1000.0, duration = ?duration, "command complete");
+    Ok(())
+}
+
+fn init_logging(logging: &LoggingConfig) -> Result<()> {
+    let level = logging.level.clone().unwrap_or_else(|| "info".into());
+    let filter = std::env::var("RUST_LOG").unwrap_or(level);
+    let env_filter = EnvFilter::try_from(filter).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
+
+    Ok(())
+}
+
+fn run_mod(stream: &DecimalStream, modulus: u64, policies: &config::PoliciesConfig) -> Result<()> {
+    if let Some(limit) = policies.max_modulus {
+        if modulus > limit {
+            warn!(modulus, limit, "modulus exceeds configured policy limit");
+        }
+    }
+    let remainder = stream.mod_u64(modulus)?;
+    info!(modulus, remainder, "streaming modulus complete");
+    println!("{remainder}");
+    Ok(())
+}
+
+fn run_div(
+    stream: &DecimalStream,
+    divisor: u32,
+    out: &PathBuf,
+    policies: &config::PoliciesConfig,
+) -> Result<()> {
+    if let Some(limit) = policies.max_divisor {
+        if divisor > limit {
+            warn!(divisor, limit, "divisor exceeds configured policy limit");
+        }
+    }
+
+    let (_path, remainder) = stream.div_u32_to_path(divisor, out)?;
+    println!("remainder={remainder}");
+    Ok(())
+}
+
+fn run_analyze(
+    stream: &DecimalStream,
+    leading: Option<usize>,
+    analysis: &config::AnalysisConfig,
+) -> Result<()> {
+    let leading_digits = leading.unwrap_or(analysis.leading_digits);
+    let len = stream.decimal_len()?;
+    let lead = stream.leading_digits(leading_digits)?;
+    info!(decimal_len = len, leading_digits = %lead, "analysis complete");
+    println!("decimal_len={len}");
+    println!("leading_digits={lead}");
+    Ok(())
 }
