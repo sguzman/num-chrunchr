@@ -9,7 +9,7 @@ use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Run the small-factor peeling strategy using streaming mod/div.
 pub fn run_peel(
@@ -31,6 +31,19 @@ pub fn run_peel(
     if primes_limit < 2 {
         bail!("strategy primes_limit must be >= 2");
     }
+
+    let max_divisions = config.policies.max_divisions;
+    let batch_size = strategy.batch_size.max(1);
+
+    info!(
+        input = %source.label(),
+        primes_limit = primes_limit,
+        batch_size = batch_size,
+        use_gpu = strategy.use_gpu,
+        max_divisions = max_divisions,
+        report_directory = %report_dir.display(),
+        "starting peel strategy"
+    );
 
     let mut report = if !reset && factors_path.exists() {
         let loaded = FactorReport::load(&factors_path)?;
@@ -61,8 +74,6 @@ pub fn run_peel(
     };
 
     let primes = sieve_primes(primes_limit);
-    let max_divisions = config.policies.max_divisions;
-    let batch_size = strategy.batch_size.max(1);
     let mut division_count = 0usize;
 
     'peel: loop {
@@ -118,6 +129,8 @@ pub fn run_peel(
         break;
     }
 
+    info!(divisions = division_count, "peeling loop completed");
+
     let sketch = build_sketch(
         &cofactor_path,
         config.stream.buffer_size,
@@ -158,7 +171,18 @@ fn sieve_primes(limit: usize) -> Vec<u32> {
 }
 
 fn compute_chunk_remainders(chunk: &[u32], config: &Config, path: &Path) -> Result<Vec<u32>> {
+    let chunk_start = chunk.first().copied().unwrap_or(0);
+    let chunk_end = chunk.last().copied().unwrap_or(0);
+    let chunk_size = chunk.len();
     let mut engine = BatchModEngine::try_new(chunk, config.strategy.use_gpu)?;
+    let used_gpu_engine = matches!(&engine, BatchModEngine::Gpu(_));
+    info!(
+        chunk_start,
+        chunk_end,
+        chunk_size,
+        use_gpu_engine = used_gpu_engine,
+        "initialized batch remainder engine"
+    );
     let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut reader = BufReader::with_capacity(config.stream.buffer_size, file);
     let mut buffer = vec![0u8; config.stream.buffer_size];
@@ -178,7 +202,16 @@ fn compute_chunk_remainders(chunk: &[u32], config: &Config, path: &Path) -> Resu
         }
     }
 
-    engine.remainders()
+    let remainders = engine.remainders()?;
+    info!(
+        chunk_start,
+        chunk_end,
+        chunk_size,
+        use_gpu_engine = used_gpu_engine,
+        "computed chunk remainders"
+    );
+    debug!(chunk_start, chunk_end, remainders = ?remainders, "chunk remainders detail");
+    Ok(remainders)
 }
 
 fn build_sketch(path: &Path, buffer_size: usize, primes: &[u64]) -> Result<Sketch> {

@@ -176,3 +176,24 @@ fn run_analyze(
     println!("leading_digits={lead}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::NumberSource;
+
+    #[test]
+    fn cli_parses_inline_number_source() {
+        let cli = Cli::parse_from(["num-chrunchr", "--number", "3141592653589793", "analyze"]);
+
+        let source = cli.number_source().expect("number source should parse");
+        match source {
+            NumberSource::Inline(text) => {
+                assert_eq!(text, "3141592653589793");
+            }
+            NumberSource::File(path) => {
+                panic!("expected inline source, got file: {}", path.display());
+            }
+        }
+    }
+}

@@ -5,8 +5,12 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use tracing::warn;
-use wgpu::util::DeviceExt;
+use tracing::{info, warn};
+use wgpu::{
+    self, BackendOptions, Backends, ComputePassDescriptor, DeviceDescriptor, InstanceDescriptor,
+    InstanceFlags, MemoryBudgetThresholds, PipelineCompilationOptions, PipelineLayoutDescriptor,
+    PollType, RequestAdapterOptions, Trace, util::DeviceExt,
+};
 
 const WORKGROUP_SIZE: u32 = 64;
 
@@ -75,12 +79,19 @@ impl BatchModEngine {
     pub fn try_new(primes: &[u32], prefer_gpu: bool) -> Result<Self> {
         if prefer_gpu {
             match GpuBatchModEngine::new(primes) {
-                Ok(engine) => return Ok(Self::Gpu(engine)),
+                Ok(engine) => {
+                    info!(
+                        prime_count = primes.len(),
+                        "GPU batch mod engine initialized"
+                    );
+                    return Ok(Self::Gpu(engine));
+                }
                 Err(err) => {
                     warn!(error = %err, "GPU batch mod initialization failed; falling back to CPU");
                 }
             }
         }
+        info!(prime_count = primes.len(), "using CPU batch mod engine");
         Ok(Self::Cpu(CpuBatchModEngine::new(primes)))
     }
 
@@ -138,26 +149,34 @@ pub struct GpuBatchModEngine {
 
 impl GpuBatchModEngine {
     pub fn new(primes: &[u32]) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            dx12_shader_compiler: Default::default(),
-        });
-        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        Self::new_with_force_fallback(primes, false)
+    }
+
+    pub fn new_with_force_fallback(primes: &[u32], force_fallback_adapter: bool) -> Result<Self> {
+        let instance_desc = InstanceDescriptor {
+            backends: Backends::all(),
+            flags: InstanceFlags::default(),
+            memory_budget_thresholds: MemoryBudgetThresholds::default(),
+            backend_options: BackendOptions::default(),
+        };
+        let instance = wgpu::Instance::new(&instance_desc);
+        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
-            force_fallback_adapter: false,
+            force_fallback_adapter,
         }))
         .context("request GPU adapter")?;
 
-        let (device, queue) = block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("batch mod device"),
-                features: wgpu::Features::empty(),
-                limits: wgpu::Limits::downlevel_defaults(),
-            },
-            None,
-        ))
-        .context("request GPU device")?;
+        let device_desc = DeviceDescriptor {
+            label: Some("batch mod device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: Trace::Off,
+        };
+        let (device, queue) =
+            block_on(adapter.request_device(&device_desc)).context("request GPU device")?;
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("batch mod shader"),
@@ -202,17 +221,19 @@ impl GpuBatchModEngine {
             ],
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("batch mod pipeline layout"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("batch mod pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: "main",
+            entry_point: Some("main"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
         });
 
         let entries: Vec<PrimeEntry> = primes
@@ -288,8 +309,9 @@ impl GpuBatchModEngine {
                 label: Some("batch mod encoder"),
             });
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("batch mod compute pass"),
+                timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
@@ -298,7 +320,7 @@ impl GpuBatchModEngine {
         }
 
         self.queue.submit(Some(encoder.finish()));
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(PollType::wait_indefinitely());
         Ok(())
     }
 
@@ -316,7 +338,7 @@ impl GpuBatchModEngine {
         });
 
         while !ready.load(Ordering::Acquire) {
-            self.device.poll(wgpu::Maintain::Wait);
+            let _ = self.device.poll(PollType::wait_indefinitely());
         }
 
         if let Some(err) = error.lock().unwrap().take() {
@@ -341,9 +363,37 @@ mod tests {
         let mut engine = BatchModEngine::try_new(&primes, false).unwrap();
         engine.update(&[1, 2, 3]).unwrap();
         let remainders = engine.remainders().unwrap();
-        let expected = 123 % 2;
-        assert_eq!(remainders[0], expected);
-        assert_eq!(remainders[1], 123 % 3);
-        assert_eq!(remainders[2], 123 % 5);
+        assert_eq!(remainders, vec![123 % 2, 123 % 3, 123 % 5]);
+    }
+
+    #[test]
+    fn gpu_batch_engine_updates_remainders() {
+        let primes = vec![2, 3, 5];
+        let mut engine = match GpuBatchModEngine::new_with_force_fallback(&primes, true) {
+            Ok(engine) => engine,
+            Err(err) => {
+                eprintln!("skipping GPU batch engine test: {err}");
+                return;
+            }
+        };
+        engine.update(&[1, 2, 3]).unwrap();
+        let remainders = engine.remainders().unwrap();
+        assert_eq!(remainders, vec![123 % 2, 123 % 3, 123 % 5]);
+    }
+
+    #[test]
+    fn batch_engine_gpu_variant_updates_remainders() {
+        let primes = vec![7, 11, 13];
+        let gpu_engine = match GpuBatchModEngine::new_with_force_fallback(&primes, true) {
+            Ok(engine) => engine,
+            Err(err) => {
+                eprintln!("skipping BatchModEngine GPU variant test: {err}");
+                return;
+            }
+        };
+        let mut engine = BatchModEngine::Gpu(gpu_engine);
+        engine.update(&[1, 2, 3]).unwrap();
+        let remainders = engine.remainders().unwrap();
+        assert_eq!(remainders, vec![123 % 7, 123 % 11, 123 % 13]);
     }
 }
