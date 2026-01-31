@@ -79,21 +79,17 @@ pub enum BatchModEngine {
 impl BatchModEngine {
     pub fn try_new(primes: &[u32], prefer_gpu: bool) -> Result<Self> {
         if prefer_gpu {
-            match GpuBatchModEngine::new(primes) {
-                Ok(engine) => {
-                    info!(
-                        prime_count = primes.len(),
-                        "GPU batch mod engine initialized"
-                    );
-                    return Ok(Self::Gpu(engine));
-                }
-                Err(err) => {
-                    warn!(error = %err, "GPU batch mod initialization failed; falling back to CPU");
-                }
-            }
+            let engine = GpuBatchModEngine::new(primes)
+                .with_context(|| "GPU batch mod initialization failed")?;
+            info!(
+                prime_count = primes.len(),
+                "GPU batch mod engine initialized"
+            );
+            Ok(Self::Gpu(engine))
+        } else {
+            info!(prime_count = primes.len(), "using CPU batch mod engine");
+            Ok(Self::Cpu(CpuBatchModEngine::new(primes)))
         }
-        info!(prime_count = primes.len(), "using CPU batch mod engine");
-        Ok(Self::Cpu(CpuBatchModEngine::new(primes)))
     }
 
     pub fn update(&mut self, digits: &[u32]) -> Result<()> {
