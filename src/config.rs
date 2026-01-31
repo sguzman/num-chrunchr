@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::{env, fs, io::Write, path::Path};
+use std::{
+    env, fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 use tracing::warn;
 
 const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
@@ -12,6 +16,7 @@ pub struct Config {
     pub stream: StreamConfig,
     pub analysis: AnalysisConfig,
     pub policies: PoliciesConfig,
+    pub strategy: StrategyConfig,
 }
 
 impl Default for Config {
@@ -21,6 +26,25 @@ impl Default for Config {
             stream: StreamConfig::default(),
             analysis: AnalysisConfig::default(),
             policies: PoliciesConfig::default(),
+            strategy: StrategyConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct StrategyConfig {
+    pub primes_limit: usize,
+    pub report_directory: PathBuf,
+    pub sketch_primes: Vec<u64>,
+}
+
+impl Default for StrategyConfig {
+    fn default() -> Self {
+        Self {
+            primes_limit: 10_000,
+            report_directory: PathBuf::from("reports"),
+            sketch_primes: vec![2, 3, 5, 7, 11, 13, 17, 19],
         }
     }
 }
@@ -111,6 +135,7 @@ impl Config {
 mod tests {
     use super::*;
     use std::fs::File;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -140,6 +165,10 @@ mod tests {
             max_modulus = 9999
             max_divisor = 7
             max_divisions = 3
+            [strategy]
+            primes_limit = 30
+            report_directory = "reports/artifacts"
+            sketch_primes = [2,3,5]
         "#,
         )
         .unwrap();
@@ -150,5 +179,11 @@ mod tests {
         assert_eq!(cfg.policies.max_modulus, Some(9999));
         assert_eq!(cfg.policies.max_divisor, Some(7));
         assert_eq!(cfg.policies.max_divisions, 3);
+        assert_eq!(cfg.strategy.primes_limit, 30);
+        assert_eq!(
+            cfg.strategy.report_directory,
+            PathBuf::from("reports/artifacts")
+        );
+        assert_eq!(cfg.strategy.sketch_primes, vec![2, 3, 5]);
     }
 }

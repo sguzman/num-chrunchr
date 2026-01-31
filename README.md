@@ -135,34 +135,32 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 
 ## CLI Usage (current)
 
-### Input file format
+### Input sources
 
-- A text file containing decimal digits.
-- Non-digit characters are ignored.
-- If the file contains no digits, it is treated as `0`.
+- Use `--input <path>` to stream decimal digits from a file (non-digit characters are ignored).
+- Use `--number "<digits>"` to provide a short decimal string inline (it is written to a temp file, which is then streamed).
 
 ### Commands
 
 - `analyze` — digit length + leading digits
 - `mod` — compute `N mod p` streaming
 - `div` — divide by a small `u32` divisor (streaming), write quotient to a file
+- `peel` — run the streaming small-factor peeling strategy; progress is stored under `reports/` (see below).
 
 ### Examples (fish shell)
 
-1) Create a file with digits:
+1) Create a file with digits or supply inline:
 
 ```fish
 printf "123456789012345678901234567890\n" > n.txt
 
-    Analyze:
+    Analyze from file:
 
 cargo run -- --input n.txt analyze --leading 20
 
-Output:
+    Analyze inline digits:
 
-    decimal_len=...
-
-    leading_digits=...
+cargo run -- --number "20260228123456" analyze
 
     Modulus:
 
@@ -172,7 +170,29 @@ cargo run -- --input n.txt mod --p 97
 
 cargo run -- --input n.txt div --d 3 --out q.txt
 
-This writes the quotient digits to q.txt and prints remainder=....
+This writes quotient digits to q.txt and prints remainder=....
+
+    Peel small factors and persist reports:
+
+cargo run -- --input n.txt peel --primes-limit 500
+
+### Reports
+
+`peel` keeps resumable state inside `config.strategy.report_directory` (default `reports/`). You can inspect:
+
+- `factors.json` — list of peeled primes/exponents along with the input label.
+- `cofactor.txt` — the current working decimal digits for the remaining cofactor.
+- `sketch.json` — residues of the current cofactor against the primes listed in `config.strategy.sketch_primes`.
+
+The next peel invocation will detect these files and resume from the last known quotient unless you pass `--reset`.
+
+### Configuration
+
+`config/default.toml` exposes the tuning knobs you need:
+
+- `logging` / `stream` / `analysis` segments we already mention.
+- `policies` (modulus/divisor limits, division budget).
+- `strategy` — `primes_limit`, `report_directory`, and `sketch_primes` control how aggressively `peel` sieves and where state is persisted.
 Logging
 
 Set RUST_LOG to control verbosity.

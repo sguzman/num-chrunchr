@@ -1,10 +1,13 @@
 mod config;
 mod repr;
+mod source;
+mod strategy;
 
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result, bail};
+use clap::{ArgGroup, Parser, Subcommand};
 use config::{Config, LoggingConfig};
 use repr::DecimalStream;
+use source::NumberSource;
 use std::{path::PathBuf, time::Instant};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -12,14 +15,19 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser)]
 #[command(name = "num-chrunchr")]
 #[command(about = "Streaming factoring + number structure toolkit", long_about = None)]
+#[command(group(ArgGroup::new("source").required(true).args(["input", "number"])))]
 struct Cli {
     /// Path to configuration TOML (defaults to config/default.toml)
     #[arg(long)]
     config: Option<PathBuf>,
 
     /// Decimal file containing digits of the number
-    #[arg(long)]
-    input: PathBuf,
+    #[arg(long, group = "source")]
+    input: Option<PathBuf>,
+
+    /// Inline decimal string to analyze
+    #[arg(long, group = "source")]
+    number: Option<String>,
 
     #[command(subcommand)]
     cmd: Command,
@@ -44,10 +52,29 @@ enum Command {
         #[arg(long)]
         leading: Option<usize>,
     },
+    /// Peel small factors using streaming trial division (resumes with reports/)
+    Peel {
+        #[arg(long)]
+        primes_limit: Option<usize>,
+        #[arg(long)]
+        reset: bool,
+    },
+}
+
+impl Cli {
+    fn number_source(&self) -> Result<NumberSource> {
+        match (&self.input, &self.number) {
+            (Some(path), None) => Ok(NumberSource::File(path.clone())),
+            (None, Some(text)) => Ok(NumberSource::Inline(text.clone())),
+            (Some(_), Some(_)) => bail!("cannot use --input and --number together"),
+            (None, None) => bail!("provide --input or --number"),
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let source = cli.number_source()?;
     let config = Config::load(cli.config.as_deref())?;
     init_logging(&config.logging)?;
     info!(
@@ -56,15 +83,35 @@ fn main() -> Result<()> {
         "configuration instantiated"
     );
 
-    info!(input = %cli.input.display(), command = ?cli.cmd, "processing request");
+    let input_label = source.label();
+    info!(input = %input_label, command = ?cli.cmd, "processing request");
     let start = Instant::now();
-    let stream = DecimalStream::from_config(&cli.input, &config.stream)
-        .with_context(|| format!("open input {}", cli.input.display()))?;
 
     match cli.cmd {
-        Command::Mod { p } => run_mod(&stream, p, &config.policies)?,
-        Command::Div { d, out } => run_div(&stream, d, &out, &config.policies)?,
-        Command::Analyze { leading } => run_analyze(&stream, leading, &config.analysis)?,
+        Command::Mod { p } => {
+            let prepared = source.prepare()?;
+            let stream = DecimalStream::from_config(&prepared.path, &config.stream)
+                .with_context(|| format!("open input {}", prepared.path.display()))?;
+            run_mod(&stream, p, &config.policies)?;
+        }
+        Command::Div { d, out } => {
+            let prepared = source.prepare()?;
+            let stream = DecimalStream::from_config(&prepared.path, &config.stream)
+                .with_context(|| format!("open input {}", prepared.path.display()))?;
+            run_div(&stream, d, &out, &config.policies)?;
+        }
+        Command::Analyze { leading } => {
+            let prepared = source.prepare()?;
+            let stream = DecimalStream::from_config(&prepared.path, &config.stream)
+                .with_context(|| format!("open input {}", prepared.path.display()))?;
+            run_analyze(&stream, leading, &config.analysis)?;
+        }
+        Command::Peel {
+            primes_limit,
+            reset,
+        } => {
+            strategy::run_peel(&source, &config, primes_limit, reset)?;
+        }
     }
 
     let duration = start.elapsed();
