@@ -1,4 +1,5 @@
 mod config;
+mod gpu;
 mod repr;
 mod source;
 mod strategy;

@@ -1,8 +1,11 @@
-use crate::{config::Config, repr::DecimalStream, source::NumberSource};
+use crate::{
+    config::Config, gpu::batch_mod::BatchModEngine, repr::DecimalStream, source::NumberSource,
+};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::{BufReader, Read},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -59,48 +62,60 @@ pub fn run_peel(
 
     let primes = sieve_primes(primes_limit);
     let max_divisions = config.policies.max_divisions;
+    let batch_size = strategy.batch_size.max(1);
     let mut division_count = 0usize;
 
-    'outer: for prime in primes {
-        if division_count >= max_divisions {
-            warn!(limit = max_divisions, "division budget reached");
-            break;
-        }
-        loop {
-            let remainder = {
-                let stream = DecimalStream::open(&cofactor_path, config.stream.buffer_size)?;
-                stream.mod_u32(prime)?
-            };
-            if remainder != 0 {
-                break;
-            }
-
-            let temp_path = report_dir.join("cofactor.tmp");
-            let stream = DecimalStream::open(&cofactor_path, config.stream.buffer_size)?;
-            stream.div_u32_to_path(prime, &temp_path)?;
-            fs::rename(&temp_path, &cofactor_path).with_context(|| {
-                format!(
-                    "move {} -> {}",
-                    temp_path.display(),
-                    cofactor_path.display()
-                )
-            })?;
-
-            report.record(prime);
-            report.save(&factors_path)?;
-            division_count += 1;
-            info!(
-                prime,
-                exponent = report.exponent(prime),
-                divisions = division_count,
-                "peeled a small factor"
-            );
-
+    'peel: loop {
+        for chunk in primes.chunks(batch_size) {
             if division_count >= max_divisions {
                 warn!(limit = max_divisions, "division budget reached");
-                break 'outer;
+                break 'peel;
+            }
+
+            let remainders =
+                compute_chunk_remainders(chunk, config, &cofactor_path).with_context(|| {
+                    format!(
+                        "compute batch remainders for primes {}..{}",
+                        chunk.first().unwrap_or(&0),
+                        chunk.last().unwrap_or(&0)
+                    )
+                })?;
+
+            for (idx, &prime) in chunk.iter().enumerate() {
+                if remainders.get(idx).copied().unwrap_or(u32::MAX) != 0 {
+                    continue;
+                }
+
+                let temp_path = report_dir.join("cofactor.tmp");
+                let stream = DecimalStream::open(&cofactor_path, config.stream.buffer_size)?;
+                stream.div_u32_to_path(prime, &temp_path)?;
+                fs::rename(&temp_path, &cofactor_path).with_context(|| {
+                    format!(
+                        "move {} -> {}",
+                        temp_path.display(),
+                        cofactor_path.display()
+                    )
+                })?;
+
+                report.record(prime);
+                report.save(&factors_path)?;
+                division_count += 1;
+                info!(
+                    prime,
+                    exponent = report.exponent(prime),
+                    divisions = division_count,
+                    "peeled a small factor"
+                );
+
+                if division_count >= max_divisions {
+                    warn!(limit = max_divisions, "division budget reached");
+                    break 'peel;
+                }
+
+                continue 'peel;
             }
         }
+        break;
     }
 
     let sketch = build_sketch(
@@ -140,6 +155,30 @@ fn sieve_primes(limit: usize) -> Vec<u32> {
         }
     }
     primes
+}
+
+fn compute_chunk_remainders(chunk: &[u32], config: &Config, path: &Path) -> Result<Vec<u32>> {
+    let mut engine = BatchModEngine::try_new(chunk, config.strategy.use_gpu)?;
+    let file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = BufReader::with_capacity(config.stream.buffer_size, file);
+    let mut buffer = vec![0u8; config.stream.buffer_size];
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let digits: Vec<u32> = buffer[..read]
+            .iter()
+            .filter(|&&b| b.is_ascii_digit())
+            .map(|&b| (b - b'0') as u32)
+            .collect();
+        if !digits.is_empty() {
+            engine.update(&digits)?;
+        }
+    }
+
+    engine.remainders()
 }
 
 fn build_sketch(path: &Path, buffer_size: usize, primes: &[u64]) -> Result<Sketch> {

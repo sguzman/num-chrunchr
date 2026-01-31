@@ -37,6 +37,8 @@ pub struct StrategyConfig {
     pub primes_limit: usize,
     pub report_directory: PathBuf,
     pub sketch_primes: Vec<u64>,
+    pub batch_size: usize,
+    pub use_gpu: bool,
 }
 
 impl Default for StrategyConfig {
@@ -45,6 +47,8 @@ impl Default for StrategyConfig {
             primes_limit: 10_000,
             report_directory: PathBuf::from("reports"),
             sketch_primes: vec![2, 3, 5, 7, 11, 13, 17, 19],
+            batch_size: 256,
+            use_gpu: false,
         }
     }
 }
@@ -169,6 +173,8 @@ mod tests {
             primes_limit = 30
             report_directory = "reports/artifacts"
             sketch_primes = [2,3,5]
+            batch_size = 512
+            use_gpu = true
         "#,
         )
         .unwrap();
@@ -185,5 +191,7 @@ mod tests {
             PathBuf::from("reports/artifacts")
         );
         assert_eq!(cfg.strategy.sketch_primes, vec![2, 3, 5]);
+        assert_eq!(cfg.strategy.batch_size, 512);
+        assert!(cfg.strategy.use_gpu);
     }
 }

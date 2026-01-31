@@ -192,7 +192,11 @@ The next peel invocation will detect these files and resume from the last known 
 
 - `logging` / `stream` / `analysis` segments we already mention.
 - `policies` (modulus/divisor limits, division budget).
-- `strategy` — `primes_limit`, `report_directory`, and `sketch_primes` control how aggressively `peel` sieves and where state is persisted.
+- `strategy` — `primes_limit`, `batch_size`, `report_directory`, `sketch_primes`, and `use_gpu` control how aggressively `peel` sieves, how many primes are grouped for each batch scan, where state is persisted, and whether the GPU-backed batch modulo kernel is engaged.
+
+### GPU acceleration
+
+When you set `strategy.use_gpu = true`, the `peel` command streams digit chunks through a `wgpu` compute shader that updates every tracked remainder across the current prime batch in parallel. The implementation falls back to the CPU engine if a compatible GPU adapter is unavailable, but the flag lets you explore how GPU-assisted remainder scanning accelerates the initial trial-division phase once you have supported hardware.
 Logging
 
 Set RUST_LOG to control verbosity.

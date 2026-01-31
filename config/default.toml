@@ -17,3 +17,5 @@ max_divisions = 32
 primes_limit = 10000
 report_directory = "reports"
 sketch_primes = [2, 3, 5, 7, 11, 13, 17, 19]
+batch_size = 256
+use_gpu = false
