@@ -73,7 +73,7 @@ Different representations excel at different operations:
   - Great: `mod p`, `div by small p`, quick size/leading-digit analysis
   - Not great: big multiplications, general-purpose big-int algorithms
 
-- **BigIntRam** (planned)
+- **BigIntRam** (implemented)
   - Great: Pollard Rho, p-1/p+1, ECM, etc.
   - Limited: RAM size
 
@@ -82,11 +82,10 @@ Different representations excel at different operations:
   - Allows: fast `mod p` without expansion via modular exponentiation
   - Enables: algebraic factor rules
 
-- **LimbFile** (planned)
+- **LimbFile** (implemented)
   - Disk-backed base 2^32/2^64 limbs
   - Great for GPU kernels and chunked high-throughput arithmetic
 
-- **Sketch** (planned)
   - Cached residues for fast screening + resumability
 
 The factoring strategy engine will choose algorithms based on:
@@ -105,6 +104,8 @@ src/
 main.rs # CLI entrypoint
 repr/
 mod.rs # DecimalStream implementation (streaming ops)
+bigint_ram.rs # RAM-based factoring helpers
+limb_file.rs # Disk-backed base 2^32 limbs for GPU/IO-friendly scans
 
 Planned expansions:
 
@@ -337,6 +338,8 @@ Primary GPU target: batch remainder scanning:
     keep remainders on-device, stream chunks from disk
 
     CPU fallback always available
+
+The batch remainder engine now ships a `repr::LimbFile` helper so you can persist base-2^32 limbs, and the `gpu::BatchModEngine`/CPU fallback already stream through those chunks via `wgpu` shaders or CPU loops depending on hardware.
 
 GPU work will likely be most practical on systems with NVIDIA hardware, but the design will aim to keep the interface backend-agnostic.
 Resumability (planned)

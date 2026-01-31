@@ -1,7 +1,10 @@
 use crate::config::StreamConfig;
 mod bigint_ram;
+mod limb_file;
 use anyhow::{Context, Result};
 pub use bigint_ram::BigIntRam;
+#[allow(unused_imports)]
+pub use limb_file::LimbFile;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};

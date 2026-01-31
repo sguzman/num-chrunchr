@@ -58,6 +58,7 @@ Once N is “only” huge (say up to a few GB of limbs) you can:
     do high-throughput modular arithmetic / gcd-style operations in blocks
 
 This is where you can start making GPU work more naturally (base 2^32 limbs are GPU-friendly).
+The `num-chrunchr::repr::LimbFile` helper now serializes a `DecimalStream` into base-2^32 limbs so those chunks are instantly available for GPU/CPU batch kernels.
 D. Expression/AST form (compressed “mathematical number”)
 
 This is your “compressed representation” track:
@@ -842,6 +843,8 @@ Step 5: LimbFile + GPU batch mods
 
     CPU fallback stays available
 
+The `repr::LimbFile` converter and `gpu::BatchModEngine` described above are now implemented, providing a tested path from decimal input to GPU-friendly limb chunks and back.
+
 6) How your “exponent series” fits into this design
 
 You’ll implement two versions:
@@ -1185,6 +1188,8 @@ Primary GPU target: batch remainder scanning:
     keep remainders on-device, stream chunks from disk
 
     CPU fallback always available
+
+Both the `gpu::BatchModEngine` and the `repr::LimbFile` converter are implemented, so the GPU remainder scan pipeline is live.
 
 GPU work will likely be most practical on systems with NVIDIA hardware, but the design will aim to keep the interface backend-agnostic.
 Resumability (planned)
