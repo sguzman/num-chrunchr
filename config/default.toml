@@ -9,7 +9,7 @@ buffer_size = 65536
 leading_digits = 32
 
 [policies]
-max_modulus = 1000000000
+max_modulus = 4294967295
 max_divisor = 1000
 max_divisions = 32
 bigint_upgrade_digits = 128
