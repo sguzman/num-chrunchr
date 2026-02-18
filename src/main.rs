@@ -59,6 +59,9 @@ enum Command {
         start: u64,
         #[arg(long)]
         end: u64,
+        /// Return repeated factors when higher powers of a divisor also divide N
+        #[arg(long, default_value_t = false)]
+        all: bool,
     },
     /// Peel small factors using streaming trial division (resumes with reports/)
     Peel {
@@ -114,11 +117,11 @@ fn main() -> Result<()> {
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
             run_analyze(&stream, leading, &config.analysis)?;
         }
-        Command::RangeFactors { start, end } => {
+        Command::RangeFactors { start, end, all } => {
             let prepared = source.prepare()?;
             let stream = DecimalStream::from_config(&prepared.path, &config.stream)
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
-            run_range_factors(&stream, start, end, &config.policies)?;
+            run_range_factors(&stream, start, end, all, &config.policies)?;
         }
         Command::Peel {
             primes_limit,
@@ -194,13 +197,14 @@ fn run_range_factors(
     stream: &DecimalStream,
     start: u64,
     end: u64,
+    all: bool,
     policies: &config::PoliciesConfig,
 ) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     write!(stdout, "[")?;
     let mut first = true;
 
-    let count = scan_factor_range(stream, start, end, policies, |factor| {
+    let count = scan_factor_range(stream, start, end, all, policies, |factor| {
         if !first {
             write!(stdout, ",")?;
         }
@@ -213,6 +217,7 @@ fn run_range_factors(
     info!(
         start,
         end,
+        all,
         factors_found = count,
         "range factor scan complete"
     );
@@ -223,6 +228,7 @@ fn scan_factor_range<F>(
     stream: &DecimalStream,
     start: u64,
     end: u64,
+    all: bool,
     policies: &config::PoliciesConfig,
     mut on_factor: F,
 ) -> Result<u64>
@@ -243,9 +249,26 @@ where
 
     let mut found = 0u64;
     for divisor in start..=end {
-        if stream.mod_u64(divisor)? == 0 {
+        if !all {
+            if stream.mod_u64(divisor)? == 0 {
+                on_factor(divisor)?;
+                found += 1;
+            }
+            continue;
+        }
+
+        // In --all mode, emit the divisor once for each power d^k that divides N.
+        let mut power = divisor;
+        loop {
+            if stream.mod_u64(power)? != 0 {
+                break;
+            }
             on_factor(divisor)?;
             found += 1;
+            match power.checked_mul(divisor) {
+                Some(next) => power = next,
+                None => break,
+            }
         }
     }
     Ok(found)
@@ -286,9 +309,10 @@ mod tests {
             "12",
         ]);
         match cli.cmd {
-            Command::RangeFactors { start, end } => {
+            Command::RangeFactors { start, end, all } => {
                 assert_eq!(start, 2);
                 assert_eq!(end, 12);
+                assert!(!all);
             }
             _ => panic!("expected range-factors command"),
         }
@@ -301,7 +325,7 @@ mod tests {
         let stream = DecimalStream::open(file.path(), 16).unwrap();
         let mut seen = Vec::new();
         let cfg = Config::default();
-        let count = scan_factor_range(&stream, 2, 12, &cfg.policies, |factor| {
+        let count = scan_factor_range(&stream, 2, 12, false, &cfg.policies, |factor| {
             seen.push(factor);
             Ok(())
         })
@@ -311,12 +335,28 @@ mod tests {
     }
 
     #[test]
+    fn scan_factor_range_all_returns_multiplicity_by_power() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "64").unwrap();
+        let stream = DecimalStream::open(file.path(), 16).unwrap();
+        let mut seen = Vec::new();
+        let cfg = Config::default();
+        let count = scan_factor_range(&stream, 2, 4, true, &cfg.policies, |factor| {
+            seen.push(factor);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 9);
+        assert_eq!(seen, vec![2, 2, 2, 2, 2, 2, 4, 4, 4]);
+    }
+
+    #[test]
     fn scan_factor_range_rejects_zero_bound() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "10").unwrap();
         let stream = DecimalStream::open(file.path(), 16).unwrap();
         let cfg = Config::default();
-        let err = scan_factor_range(&stream, 0, 10, &cfg.policies, |_| Ok(())).unwrap_err();
+        let err = scan_factor_range(&stream, 0, 10, false, &cfg.policies, |_| Ok(())).unwrap_err();
         assert!(err.to_string().contains("positive integers"));
     }
 }
