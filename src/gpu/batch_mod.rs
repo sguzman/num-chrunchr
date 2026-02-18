@@ -19,11 +19,14 @@ const SHADER_SOURCE: &str = r#"
 struct PrimeEntry {
     value: u32,
     remainder: u32,
+    factor: u32,
 };
 
 struct Params {
     len: u32,
     prime_count: u32,
+    radix: u32,
+    little_endian: u32,
 };
 
 @group(0) @binding(0)
@@ -43,10 +46,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var entry = primes[gid.x];
     let modulus = entry.value;
     var remainder = entry.remainder;
+    var factor = entry.factor;
     for (var i: u32 = 0u; i < params.len; i = i + 1u) {
-        remainder = ((remainder * 10u) + digits[i]) % modulus;
+        if (params.little_endian == 1u) {
+            remainder = (remainder + (digits[i] * factor)) % modulus;
+            factor = (factor * params.radix) % modulus;
+        } else {
+            remainder = ((remainder * params.radix) + digits[i]) % modulus;
+        }
     }
     entry.remainder = remainder;
+    entry.factor = factor;
     primes[gid.x] = entry;
 }
 "#;
@@ -56,6 +66,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 struct PrimeEntry {
     value: u32,
     remainder: u32,
+    factor: u32,
 }
 
 #[repr(C)]
@@ -63,12 +74,25 @@ struct PrimeEntry {
 struct Params {
     len: u32,
     prime_count: u32,
+    radix: u32,
+    little_endian: u32,
 }
 
 impl Params {
-    fn new(len: u32, prime_count: u32) -> Self {
-        Self { len, prime_count }
+    fn new(len: u32, prime_count: u32, radix: u32, little_endian: bool) -> Self {
+        Self {
+            len,
+            prime_count,
+            radix,
+            little_endian: little_endian as u32,
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum SymbolOrder {
+    BigEndian,
+    LittleEndian,
 }
 
 pub enum BatchModEngine {
@@ -93,9 +117,18 @@ impl BatchModEngine {
     }
 
     pub fn update(&mut self, digits: &[u32]) -> Result<()> {
+        self.update_symbols(digits, 10, SymbolOrder::BigEndian)
+    }
+
+    pub fn update_symbols(
+        &mut self,
+        symbols: &[u32],
+        radix: u32,
+        order: SymbolOrder,
+    ) -> Result<()> {
         match self {
-            BatchModEngine::Cpu(engine) => engine.update(digits),
-            BatchModEngine::Gpu(engine) => engine.update(digits),
+            BatchModEngine::Cpu(engine) => engine.update_symbols(symbols, radix, order),
+            BatchModEngine::Gpu(engine) => engine.update_symbols(symbols, radix, order),
         }
     }
 
@@ -109,6 +142,7 @@ impl BatchModEngine {
 
 pub struct CpuBatchModEngine {
     remainders: Vec<u32>,
+    factors: Vec<u32>,
     primes: Vec<u32>,
 }
 
@@ -117,14 +151,35 @@ impl CpuBatchModEngine {
         Self {
             primes: primes.to_vec(),
             remainders: vec![0; primes.len()],
+            factors: vec![1; primes.len()],
         }
     }
 
-    pub fn update(&mut self, digits: &[u32]) -> Result<()> {
-        for (remainder, &prime) in self.remainders.iter_mut().zip(&self.primes) {
-            for &digit in digits {
-                let tmp = (*remainder as u64) * 10 + (digit as u64);
-                *remainder = (tmp % prime as u64) as u32;
+    pub fn update_symbols(
+        &mut self,
+        symbols: &[u32],
+        radix: u32,
+        order: SymbolOrder,
+    ) -> Result<()> {
+        for ((remainder, factor), &prime) in self
+            .remainders
+            .iter_mut()
+            .zip(self.factors.iter_mut())
+            .zip(&self.primes)
+        {
+            let modulus = prime as u64;
+            for &symbol in symbols {
+                match order {
+                    SymbolOrder::BigEndian => {
+                        let tmp = (*remainder as u64) * (radix as u64) + (symbol as u64);
+                        *remainder = (tmp % modulus) as u32;
+                    }
+                    SymbolOrder::LittleEndian => {
+                        let tmp = (*remainder as u64) + (symbol as u64) * (*factor as u64);
+                        *remainder = (tmp % modulus) as u32;
+                        *factor = (((*factor as u64) * (radix as u64)) % modulus) as u32;
+                    }
+                }
             }
         }
         Ok(())
@@ -238,6 +293,7 @@ impl GpuBatchModEngine {
             .map(|&value| PrimeEntry {
                 value,
                 remainder: 0,
+                factor: 1,
             })
             .collect();
 
@@ -258,7 +314,16 @@ impl GpuBatchModEngine {
     }
 
     pub fn update(&mut self, digits: &[u32]) -> Result<()> {
-        if digits.is_empty() {
+        self.update_symbols(digits, 10, SymbolOrder::BigEndian)
+    }
+
+    pub fn update_symbols(
+        &mut self,
+        symbols: &[u32],
+        radix: u32,
+        order: SymbolOrder,
+    ) -> Result<()> {
+        if symbols.is_empty() {
             return Ok(());
         }
 
@@ -266,11 +331,16 @@ impl GpuBatchModEngine {
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("digits buffer"),
-                contents: bytemuck::cast_slice(digits),
+                contents: bytemuck::cast_slice(symbols),
                 usage: wgpu::BufferUsages::STORAGE,
             });
 
-        let params = Params::new(digits.len() as u32, self.prime_count);
+        let params = Params::new(
+            symbols.len() as u32,
+            self.prime_count,
+            radix,
+            matches!(order, SymbolOrder::LittleEndian),
+        );
         let params_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -414,5 +484,17 @@ mod tests {
         engine.update(&[1, 2, 3]).unwrap();
         let remainders = engine.remainders().unwrap();
         assert_eq!(remainders, vec![123 % 7, 123 % 11, 123 % 13]);
+    }
+
+    #[test]
+    fn cpu_batch_engine_supports_little_endian_base_256() {
+        let primes = vec![5, 7, 11];
+        let mut engine = BatchModEngine::try_new(&primes, false).unwrap();
+        engine
+            .update_symbols(&[1, 2], 256, SymbolOrder::LittleEndian)
+            .unwrap();
+        // Little-endian bytes [1,2] represent 0x0201 = 513.
+        let remainders = engine.remainders().unwrap();
+        assert_eq!(remainders, vec![513 % 5, 513 % 7, 513 % 11]);
     }
 }

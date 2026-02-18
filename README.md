@@ -146,7 +146,7 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 - `analyze` — digit length + leading digits
 - `mod` — compute `N mod p` streaming
 - `div` — divide by a small `u32` divisor (streaming), write quotient to a file
-- `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks (`--all` includes repeated factors for each divisor power that divides `N`).
+- `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks (`--all` includes repeated factors for each divisor power that divides `N`). Supports decimal input (default) and raw binary input (`--binary`, default big-endian, optional `--little-endian`), and supports GPU batch scanning with `--use-gpu`.
 - `peel` — run the streaming small-factor peeling strategy; progress is stored under `reports/` (see below).
 
 ### Examples (fish shell)
@@ -184,6 +184,14 @@ cargo run -- --input n.txt range-factors --start 2 --end 1000 --all
 
 This includes repeated entries when `d^k` keeps dividing `N` for the same divisor `d`.
 
+cargo run -- --input n.bin range-factors --start 2 --end 1000 --binary --use-gpu
+
+This treats `n.bin` as a raw big-endian integer and uses the GPU batch remainder engine.
+
+cargo run -- --input n.bin range-factors --start 2 --end 1000 --binary --little-endian --use-gpu
+
+This reads the same raw bytes as little-endian.
+
     Peel small factors and persist reports:
 
 cargo run -- --input n.txt peel --primes-limit 500
@@ -209,7 +217,7 @@ The next peel invocation will detect these files and resume from the last known 
 
 ### GPU acceleration
 
-When you set `strategy.use_gpu = true`, the `peel` command streams digit chunks through a `wgpu` compute shader that updates every tracked remainder across the current prime batch in parallel. The implementation falls back to the CPU engine if a compatible GPU adapter is unavailable, but the flag lets you explore how GPU-assisted remainder scanning accelerates the initial trial-division phase once you have supported hardware.
+When you set `strategy.use_gpu = true`, the `peel` command streams digit chunks through a `wgpu` compute shader that updates every tracked remainder across the current prime batch in parallel. GPU initialization is treated as required in this mode, so failures abort the run instead of silently falling back.
 Logging
 
 Set RUST_LOG to control verbosity.

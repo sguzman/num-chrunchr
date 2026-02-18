@@ -7,9 +7,15 @@ mod strategy;
 use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Parser, Subcommand};
 use config::{Config, LoggingConfig};
+use gpu::batch_mod::{BatchModEngine, SymbolOrder};
 use repr::DecimalStream;
 use source::NumberSource;
-use std::{io::Write, path::PathBuf, time::Instant};
+use std::{
+    fs::File,
+    io::{BufReader, Read, Write},
+    path::{Path, PathBuf},
+    time::Instant,
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -62,6 +68,15 @@ enum Command {
         /// Return repeated factors when higher powers of a divisor also divide N
         #[arg(long, default_value_t = false)]
         all: bool,
+        /// Read --input as a raw binary integer (default is decimal digits)
+        #[arg(long, default_value_t = false)]
+        binary: bool,
+        /// Interpret raw binary bytes as little-endian (default big-endian)
+        #[arg(long, default_value_t = false)]
+        little_endian: bool,
+        /// Use the batch remainder GPU engine for faster range scans
+        #[arg(long, default_value_t = false)]
+        use_gpu: bool,
     },
     /// Peel small factors using streaming trial division (resumes with reports/)
     Peel {
@@ -117,11 +132,45 @@ fn main() -> Result<()> {
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
             run_analyze(&stream, leading, &config.analysis)?;
         }
-        Command::RangeFactors { start, end, all } => {
+        Command::RangeFactors {
+            start,
+            end,
+            all,
+            binary,
+            little_endian,
+            use_gpu,
+        } => {
+            if binary {
+                match &source {
+                    NumberSource::File(_) => {}
+                    NumberSource::Inline(_) => {
+                        bail!("--binary requires --input with a file path");
+                    }
+                }
+            }
             let prepared = source.prepare()?;
-            let stream = DecimalStream::from_config(&prepared.path, &config.stream)
-                .with_context(|| format!("open input {}", prepared.path.display()))?;
-            run_range_factors(&stream, start, end, all, &config.policies)?;
+            let encoding = if binary {
+                if little_endian {
+                    NumberEncoding::BinaryLittleEndian
+                } else {
+                    NumberEncoding::BinaryBigEndian
+                }
+            } else {
+                if little_endian {
+                    bail!("--little-endian is only valid with --binary");
+                }
+                NumberEncoding::Decimal
+            };
+            run_range_factors(
+                &prepared.path,
+                config.stream.buffer_size,
+                start,
+                end,
+                all,
+                use_gpu,
+                encoding,
+                &config.policies,
+            )?;
         }
         Command::Peel {
             primes_limit,
@@ -194,41 +243,66 @@ fn run_analyze(
 }
 
 fn run_range_factors(
-    stream: &DecimalStream,
+    input_path: &Path,
+    buffer_size: usize,
     start: u64,
     end: u64,
     all: bool,
+    use_gpu: bool,
+    encoding: NumberEncoding,
     policies: &config::PoliciesConfig,
 ) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     write!(stdout, "[")?;
     let mut first = true;
 
-    let count = scan_factor_range(stream, start, end, all, policies, |factor| {
-        if !first {
-            write!(stdout, ",")?;
-        }
-        first = false;
-        write!(stdout, "{factor}")?;
-        Ok(())
-    })?;
+    let count = scan_factor_range(
+        input_path,
+        buffer_size,
+        start,
+        end,
+        all,
+        use_gpu,
+        encoding,
+        policies,
+        |factor| {
+            if !first {
+                write!(stdout, ",")?;
+            }
+            first = false;
+            write!(stdout, "{factor}")?;
+            Ok(())
+        },
+    )?;
 
     writeln!(stdout, "]")?;
     info!(
         start,
         end,
         all,
+        use_gpu,
+        encoding = ?encoding,
         factors_found = count,
         "range factor scan complete"
     );
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NumberEncoding {
+    Decimal,
+    BinaryBigEndian,
+    BinaryLittleEndian,
+}
+
 fn scan_factor_range<F>(
-    stream: &DecimalStream,
+    input_path: &Path,
+    buffer_size: usize,
     start: u64,
     end: u64,
     all: bool,
+    use_gpu: bool,
+    encoding: NumberEncoding,
     policies: &config::PoliciesConfig,
     mut on_factor: F,
 ) -> Result<u64>
@@ -247,10 +321,32 @@ where
         }
     }
 
+    if use_gpu && end > u32::MAX as u64 {
+        bail!("--use-gpu only supports divisors up to {}", u32::MAX);
+    }
+
+    if use_gpu {
+        return scan_factor_range_batched(
+            input_path,
+            buffer_size,
+            start,
+            end,
+            all,
+            true,
+            encoding,
+            &mut on_factor,
+        );
+    }
+
     let mut found = 0u64;
     for divisor in start..=end {
+        if divisor == 1 {
+            on_factor(1)?;
+            found += 1;
+            continue;
+        }
         if !all {
-            if stream.mod_u64(divisor)? == 0 {
+            if mod_from_file(input_path, buffer_size, divisor, encoding)? == 0 {
                 on_factor(divisor)?;
                 found += 1;
             }
@@ -260,7 +356,7 @@ where
         // In --all mode, emit the divisor once for each power d^k that divides N.
         let mut power = divisor;
         loop {
-            if stream.mod_u64(power)? != 0 {
+            if mod_from_file(input_path, buffer_size, power, encoding)? != 0 {
                 break;
             }
             on_factor(divisor)?;
@@ -272,6 +368,165 @@ where
         }
     }
     Ok(found)
+}
+
+fn scan_factor_range_batched<F>(
+    input_path: &Path,
+    buffer_size: usize,
+    start: u64,
+    end: u64,
+    all: bool,
+    use_gpu: bool,
+    encoding: NumberEncoding,
+    on_factor: &mut F,
+) -> Result<u64>
+where
+    F: FnMut(u64) -> Result<()>,
+{
+    let mut found = 0u64;
+    let mut chunk_start = start;
+    const CHUNK_SIZE: u64 = 1024;
+    while chunk_start <= end {
+        let chunk_end = chunk_start
+            .saturating_add(CHUNK_SIZE - 1)
+            .min(end)
+            .min(u32::MAX as u64);
+        let divisors: Vec<u32> = (chunk_start..=chunk_end).map(|d| d as u32).collect();
+        let mut engine = BatchModEngine::try_new(&divisors, use_gpu)?;
+        stream_symbols(input_path, buffer_size, encoding, |symbols| {
+            if !symbols.is_empty() {
+                let (radix, order) = encoding_batch_params(encoding);
+                engine.update_symbols(symbols, radix, order)?;
+            }
+            Ok(())
+        })?;
+        let remainders = engine.remainders()?;
+        for (&divisor_u32, &remainder) in divisors.iter().zip(remainders.iter()) {
+            let divisor = divisor_u32 as u64;
+            if divisor == 1 {
+                on_factor(1)?;
+                found += 1;
+                continue;
+            }
+            if remainder != 0 {
+                continue;
+            }
+            if !all {
+                on_factor(divisor)?;
+                found += 1;
+                continue;
+            }
+            let mut power = divisor;
+            loop {
+                if mod_from_file(input_path, buffer_size, power, encoding)? != 0 {
+                    break;
+                }
+                on_factor(divisor)?;
+                found += 1;
+                match power.checked_mul(divisor) {
+                    Some(next) => power = next,
+                    None => break,
+                }
+            }
+        }
+        if chunk_end == end {
+            break;
+        }
+        chunk_start = chunk_end + 1;
+    }
+    Ok(found)
+}
+
+fn encoding_batch_params(encoding: NumberEncoding) -> (u32, SymbolOrder) {
+    match encoding {
+        NumberEncoding::Decimal => (10, SymbolOrder::BigEndian),
+        NumberEncoding::BinaryBigEndian => (256, SymbolOrder::BigEndian),
+        NumberEncoding::BinaryLittleEndian => (256, SymbolOrder::LittleEndian),
+    }
+}
+
+fn mod_from_file(
+    input_path: &Path,
+    buffer_size: usize,
+    modulus: u64,
+    encoding: NumberEncoding,
+) -> Result<u64> {
+    if modulus == 0 {
+        bail!("modulus must be nonzero");
+    }
+    let mut reader = BufReader::new(
+        File::open(input_path)
+            .with_context(|| format!("failed to open {}", input_path.display()))?,
+    );
+    let mut buf = vec![0u8; buffer_size];
+    let mut remainder = 0u64;
+    let mut factor = 1u64;
+
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        match encoding {
+            NumberEncoding::Decimal => {
+                for &byte in &buf[..read] {
+                    if byte.is_ascii_digit() {
+                        remainder = (remainder * 10 + (byte - b'0') as u64) % modulus;
+                    }
+                }
+            }
+            NumberEncoding::BinaryBigEndian => {
+                for &byte in &buf[..read] {
+                    remainder = (remainder * 256 + byte as u64) % modulus;
+                }
+            }
+            NumberEncoding::BinaryLittleEndian => {
+                for &byte in &buf[..read] {
+                    remainder = (remainder + (byte as u64) * factor) % modulus;
+                    factor = (factor * 256) % modulus;
+                }
+            }
+        }
+    }
+    Ok(remainder)
+}
+
+fn stream_symbols<F>(
+    input_path: &Path,
+    buffer_size: usize,
+    encoding: NumberEncoding,
+    mut on_symbols: F,
+) -> Result<()>
+where
+    F: FnMut(&[u32]) -> Result<()>,
+{
+    let mut reader = BufReader::new(
+        File::open(input_path)
+            .with_context(|| format!("failed to open {}", input_path.display()))?,
+    );
+    let mut raw = vec![0u8; buffer_size];
+    let mut symbols = Vec::with_capacity(buffer_size);
+    loop {
+        let read = reader.read(&mut raw)?;
+        if read == 0 {
+            break;
+        }
+        symbols.clear();
+        match encoding {
+            NumberEncoding::Decimal => {
+                for &byte in &raw[..read] {
+                    if byte.is_ascii_digit() {
+                        symbols.push((byte - b'0') as u32);
+                    }
+                }
+            }
+            NumberEncoding::BinaryBigEndian | NumberEncoding::BinaryLittleEndian => {
+                symbols.extend(raw[..read].iter().map(|&b| b as u32));
+            }
+        }
+        on_symbols(&symbols)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -309,10 +564,20 @@ mod tests {
             "12",
         ]);
         match cli.cmd {
-            Command::RangeFactors { start, end, all } => {
+            Command::RangeFactors {
+                start,
+                end,
+                all,
+                binary,
+                little_endian,
+                use_gpu,
+            } => {
                 assert_eq!(start, 2);
                 assert_eq!(end, 12);
                 assert!(!all);
+                assert!(!binary);
+                assert!(!little_endian);
+                assert!(!use_gpu);
             }
             _ => panic!("expected range-factors command"),
         }
@@ -322,13 +587,22 @@ mod tests {
     fn scan_factor_range_finds_expected_divisors() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "360").unwrap();
-        let stream = DecimalStream::open(file.path(), 16).unwrap();
         let mut seen = Vec::new();
         let cfg = Config::default();
-        let count = scan_factor_range(&stream, 2, 12, false, &cfg.policies, |factor| {
-            seen.push(factor);
-            Ok(())
-        })
+        let count = scan_factor_range(
+            file.path(),
+            16,
+            2,
+            12,
+            false,
+            false,
+            NumberEncoding::Decimal,
+            &cfg.policies,
+            |factor| {
+                seen.push(factor);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(count, 9);
         assert_eq!(seen, vec![2, 3, 4, 5, 6, 8, 9, 10, 12]);
@@ -338,13 +612,22 @@ mod tests {
     fn scan_factor_range_all_returns_multiplicity_by_power() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "64").unwrap();
-        let stream = DecimalStream::open(file.path(), 16).unwrap();
         let mut seen = Vec::new();
         let cfg = Config::default();
-        let count = scan_factor_range(&stream, 2, 4, true, &cfg.policies, |factor| {
-            seen.push(factor);
-            Ok(())
-        })
+        let count = scan_factor_range(
+            file.path(),
+            16,
+            2,
+            4,
+            true,
+            false,
+            NumberEncoding::Decimal,
+            &cfg.policies,
+            |factor| {
+                seen.push(factor);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(count, 9);
         assert_eq!(seen, vec![2, 2, 2, 2, 2, 2, 4, 4, 4]);
@@ -354,9 +637,99 @@ mod tests {
     fn scan_factor_range_rejects_zero_bound() {
         let mut file = NamedTempFile::new().unwrap();
         write!(file, "10").unwrap();
-        let stream = DecimalStream::open(file.path(), 16).unwrap();
         let cfg = Config::default();
-        let err = scan_factor_range(&stream, 0, 10, false, &cfg.policies, |_| Ok(())).unwrap_err();
+        let err = scan_factor_range(
+            file.path(),
+            16,
+            0,
+            10,
+            false,
+            false,
+            NumberEncoding::Decimal,
+            &cfg.policies,
+            |_| Ok(()),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("positive integers"));
+    }
+
+    #[test]
+    fn scan_factor_range_binary_big_endian() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&[0x01, 0x00]).unwrap();
+        let mut seen = Vec::new();
+        let cfg = Config::default();
+        let count = scan_factor_range(
+            file.path(),
+            16,
+            2,
+            16,
+            false,
+            false,
+            NumberEncoding::BinaryBigEndian,
+            &cfg.policies,
+            |factor| {
+                seen.push(factor);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(seen, vec![2, 4, 8, 16]);
+    }
+
+    #[test]
+    fn scan_factor_range_binary_little_endian() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&[0x01, 0x00]).unwrap();
+        let mut seen = Vec::new();
+        let cfg = Config::default();
+        let count = scan_factor_range(
+            file.path(),
+            16,
+            2,
+            3,
+            false,
+            false,
+            NumberEncoding::BinaryLittleEndian,
+            &cfg.policies,
+            |factor| {
+                seen.push(factor);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 0);
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn scan_factor_range_decimal_with_gpu_engine() {
+        if crate::gpu::batch_mod::GpuBatchModEngine::new_with_force_fallback(&[2, 3], true).is_err()
+        {
+            eprintln!("skipping GPU range-factors test: no compatible adapter");
+            return;
+        }
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "360").unwrap();
+        let mut seen = Vec::new();
+        let cfg = Config::default();
+        let count = scan_factor_range(
+            file.path(),
+            16,
+            2,
+            12,
+            false,
+            true,
+            NumberEncoding::Decimal,
+            &cfg.policies,
+            |factor| {
+                seen.push(factor);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 9);
+        assert_eq!(seen, vec![2, 3, 4, 5, 6, 8, 9, 10, 12]);
     }
 }
