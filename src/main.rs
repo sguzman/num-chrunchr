@@ -36,6 +36,14 @@ struct Cli {
     #[arg(long, group = "source")]
     number: Option<String>,
 
+    /// Read --input as a raw binary integer (default is decimal digits)
+    #[arg(long, default_value_t = false)]
+    binary: bool,
+
+    /// Interpret raw binary bytes as little-endian (default big-endian)
+    #[arg(long, default_value_t = false)]
+    little_endian: bool,
+
     #[command(subcommand)]
     cmd: Command,
 }
@@ -74,12 +82,6 @@ enum Command {
         /// Return only the largest factor in the scan range
         #[arg(long, default_value_t = false)]
         last: bool,
-        /// Read --input as a raw binary integer (default is decimal digits)
-        #[arg(long, default_value_t = false)]
-        binary: bool,
-        /// Interpret raw binary bytes as little-endian (default big-endian)
-        #[arg(long, default_value_t = false)]
-        little_endian: bool,
         /// Use the batch remainder GPU engine for faster range scans
         #[arg(long, default_value_t = false)]
         use_gpu: bool,
@@ -105,11 +107,33 @@ impl Cli {
             (None, None) => bail!("provide --input or --number"),
         }
     }
+
+    fn encoding(&self, source: &NumberSource) -> Result<NumberEncoding> {
+        if self.little_endian && !self.binary {
+            bail!("--little-endian is only valid with --binary");
+        }
+        if self.binary {
+            match source {
+                NumberSource::File(_) => {}
+                NumberSource::Inline(_) => {
+                    bail!("--binary requires --input with a file path");
+                }
+            }
+            if self.little_endian {
+                Ok(NumberEncoding::BinaryLittleEndian)
+            } else {
+                Ok(NumberEncoding::BinaryBigEndian)
+            }
+        } else {
+            Ok(NumberEncoding::Decimal)
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let source = cli.number_source()?;
+    let encoding = cli.encoding(&source)?;
     let config = Config::load(cli.config.as_deref())?;
     init_logging(&config.logging)?;
     info!(
@@ -125,17 +149,27 @@ fn main() -> Result<()> {
     match cli.cmd {
         Command::Mod { p } => {
             let prepared = source.prepare()?;
-            let stream = DecimalStream::from_config(&prepared.path, &config.stream)
-                .with_context(|| format!("open input {}", prepared.path.display()))?;
-            run_mod(&stream, p, &config.policies)?;
+            run_mod_from_file(
+                &prepared.path,
+                config.stream.buffer_size,
+                p,
+                encoding,
+                &config.policies,
+            )?;
         }
         Command::Div { d, out } => {
+            if encoding != NumberEncoding::Decimal {
+                bail!("div command currently supports decimal input only");
+            }
             let prepared = source.prepare()?;
             let stream = DecimalStream::from_config(&prepared.path, &config.stream)
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
             run_div(&stream, d, &out, &config.policies)?;
         }
         Command::Analyze { leading } => {
+            if encoding != NumberEncoding::Decimal {
+                bail!("analyze command currently supports decimal input only");
+            }
             let prepared = source.prepare()?;
             let stream = DecimalStream::from_config(&prepared.path, &config.stream)
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
@@ -147,8 +181,6 @@ fn main() -> Result<()> {
             all,
             first,
             last,
-            binary,
-            little_endian,
             use_gpu,
             gpu_batch_size,
         } => {
@@ -158,27 +190,7 @@ fn main() -> Result<()> {
             if all && (first || last) {
                 bail!("--all cannot be combined with --first or --last");
             }
-            if binary {
-                match &source {
-                    NumberSource::File(_) => {}
-                    NumberSource::Inline(_) => {
-                        bail!("--binary requires --input with a file path");
-                    }
-                }
-            }
             let prepared = source.prepare()?;
-            let encoding = if binary {
-                if little_endian {
-                    NumberEncoding::BinaryLittleEndian
-                } else {
-                    NumberEncoding::BinaryBigEndian
-                }
-            } else {
-                if little_endian {
-                    bail!("--little-endian is only valid with --binary");
-                }
-                NumberEncoding::Decimal
-            };
             run_range_factors(
                 &prepared.path,
                 config.stream.buffer_size,
@@ -197,6 +209,9 @@ fn main() -> Result<()> {
             primes_limit,
             reset,
         } => {
+            if encoding != NumberEncoding::Decimal {
+                bail!("peel command currently supports decimal input only");
+            }
             strategy::run_peel(&source, &config, primes_limit, reset)?;
         }
     }
@@ -220,13 +235,19 @@ fn init_logging(logging: &LoggingConfig) -> Result<()> {
     Ok(())
 }
 
-fn run_mod(stream: &DecimalStream, modulus: u64, policies: &config::PoliciesConfig) -> Result<()> {
+fn run_mod_from_file(
+    input_path: &Path,
+    buffer_size: usize,
+    modulus: u64,
+    encoding: NumberEncoding,
+    policies: &config::PoliciesConfig,
+) -> Result<()> {
     if let Some(limit) = policies.max_modulus {
         if modulus > limit {
             warn!(modulus, limit, "modulus exceeds configured policy limit");
         }
     }
-    let remainder = stream.mod_u64(modulus)?;
+    let remainder = mod_from_file(input_path, buffer_size, modulus, encoding)?;
     info!(modulus, remainder, "streaming modulus complete");
     println!("{remainder}");
     Ok(())
@@ -779,8 +800,6 @@ mod tests {
                 all,
                 first,
                 last,
-                binary,
-                little_endian,
                 use_gpu,
                 gpu_batch_size,
             } => {
@@ -789,13 +808,13 @@ mod tests {
                 assert!(!all);
                 assert!(!first);
                 assert!(!last);
-                assert!(!binary);
-                assert!(!little_endian);
                 assert!(!use_gpu);
                 assert!(gpu_batch_size.is_none());
             }
             _ => panic!("expected range-factors command"),
         }
+        assert!(!cli.binary);
+        assert!(!cli.little_endian);
     }
 
     #[test]
@@ -804,6 +823,8 @@ mod tests {
             "num-chrunchr",
             "--number",
             "360",
+            "--binary",
+            "--little-endian",
             "range-factors",
             "--start",
             "2",
@@ -824,6 +845,40 @@ mod tests {
             }
             _ => panic!("expected range-factors command"),
         }
+        assert!(cli.binary);
+        assert!(cli.little_endian);
+    }
+
+    #[test]
+    fn cli_rejects_little_endian_without_binary() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "360",
+            "--little-endian",
+            "mod",
+            "--p",
+            "7",
+        ]);
+        let source = cli.number_source().unwrap();
+        let err = cli.encoding(&source).unwrap_err();
+        assert!(err.to_string().contains("--little-endian"));
+    }
+
+    #[test]
+    fn cli_rejects_binary_inline_source() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "360",
+            "--binary",
+            "mod",
+            "--p",
+            "7",
+        ]);
+        let source = cli.number_source().unwrap();
+        let err = cli.encoding(&source).unwrap_err();
+        assert!(err.to_string().contains("--binary requires --input"));
     }
 
     #[test]

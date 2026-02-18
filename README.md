@@ -140,13 +140,14 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 
 - Use `--input <path>` to stream decimal digits from a file (non-digit characters are ignored).
 - Use `--number "<digits>"` to provide a short decimal string inline (it is written to a temp file, which is then streamed).
+- Use global `--binary` to treat `--input` as raw bytes encoding an integer; default byte order is big-endian, and `--little-endian` switches order.
 
 ### Commands
 
 - `analyze` — digit length + leading digits
 - `mod` — compute `N mod p` streaming
 - `div` — divide by a small `u32` divisor (streaming), write quotient to a file
-- `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks (`--all` includes repeated factors for each divisor power that divides `N`). Supports decimal input (default) and raw binary input (`--binary`, default big-endian, optional `--little-endian`), and supports GPU batch scanning with `--use-gpu`.
+- `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks (`--all` includes repeated factors for each divisor power that divides `N`), with optional GPU batch scanning via `--use-gpu`.
   - With `--use-gpu`, divisors up to `u32::MAX` are scanned on the GPU and larger divisors in the same request are scanned on CPU.
   - `--first` returns only the first factor found in ascending scan order; `--last` returns only the largest factor found in range.
   - `--gpu-batch-size <N>` tunes divisors-per-GPU-chunk; `0` means auto-tune from adapter limits.
@@ -171,11 +172,15 @@ cargo run -- --number "20260228123456" analyze
 
 cargo run -- --input n.txt mod --p 97
 
+cargo run -- --input n.bin --binary --little-endian mod --p 97
+
     Divide:
 
 cargo run -- --input n.txt div --d 3 --out q.txt
 
 This writes quotient digits to q.txt and prints remainder=....
+
+`div`, `analyze`, and `peel` currently support decimal input only; `--binary` is supported by `mod` and `range-factors`.
 
     Range divisor scan:
 
@@ -195,11 +200,11 @@ cargo run -- --input n.txt range-factors --start 2 --end 1000 --last
 
 This returns only the largest factor in range (or `null` if none are found).
 
-cargo run -- --input n.bin range-factors --start 2 --end 1000 --binary --use-gpu
+cargo run -- --input n.bin --binary range-factors --start 2 --end 1000 --use-gpu
 
 This treats `n.bin` as a raw big-endian integer and uses the GPU batch remainder engine.
 
-cargo run -- --input n.bin range-factors --start 2 --end 1000 --binary --little-endian --use-gpu
+cargo run -- --input n.bin --binary --little-endian range-factors --start 2 --end 1000 --use-gpu
 
 This reads the same raw bytes as little-endian.
 
