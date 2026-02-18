@@ -9,7 +9,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 use config::{Config, LoggingConfig};
 use repr::DecimalStream;
 use source::NumberSource;
-use std::{path::PathBuf, time::Instant};
+use std::{io::Write, path::PathBuf, time::Instant};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -52,6 +52,13 @@ enum Command {
     Analyze {
         #[arg(long)]
         leading: Option<usize>,
+    },
+    /// Scan an inclusive divisor range and print factors found in that range
+    RangeFactors {
+        #[arg(long)]
+        start: u64,
+        #[arg(long)]
+        end: u64,
     },
     /// Peel small factors using streaming trial division (resumes with reports/)
     Peel {
@@ -106,6 +113,12 @@ fn main() -> Result<()> {
             let stream = DecimalStream::from_config(&prepared.path, &config.stream)
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
             run_analyze(&stream, leading, &config.analysis)?;
+        }
+        Command::RangeFactors { start, end } => {
+            let prepared = source.prepare()?;
+            let stream = DecimalStream::from_config(&prepared.path, &config.stream)
+                .with_context(|| format!("open input {}", prepared.path.display()))?;
+            run_range_factors(&stream, start, end, &config.policies)?;
         }
         Command::Peel {
             primes_limit,
@@ -177,10 +190,73 @@ fn run_analyze(
     Ok(())
 }
 
+fn run_range_factors(
+    stream: &DecimalStream,
+    start: u64,
+    end: u64,
+    policies: &config::PoliciesConfig,
+) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    write!(stdout, "[")?;
+    let mut first = true;
+
+    let count = scan_factor_range(stream, start, end, policies, |factor| {
+        if !first {
+            write!(stdout, ",")?;
+        }
+        first = false;
+        write!(stdout, "{factor}")?;
+        Ok(())
+    })?;
+
+    writeln!(stdout, "]")?;
+    info!(
+        start,
+        end,
+        factors_found = count,
+        "range factor scan complete"
+    );
+    Ok(())
+}
+
+fn scan_factor_range<F>(
+    stream: &DecimalStream,
+    start: u64,
+    end: u64,
+    policies: &config::PoliciesConfig,
+    mut on_factor: F,
+) -> Result<u64>
+where
+    F: FnMut(u64) -> Result<()>,
+{
+    if start == 0 || end == 0 {
+        bail!("range bounds must be positive integers");
+    }
+    if start > end {
+        bail!("range start must be <= end");
+    }
+    if let Some(limit) = policies.max_modulus {
+        if end > limit {
+            warn!(end, limit, "range end exceeds configured policy limit");
+        }
+    }
+
+    let mut found = 0u64;
+    for divisor in start..=end {
+        if stream.mod_u64(divisor)? == 0 {
+            on_factor(divisor)?;
+            found += 1;
+        }
+    }
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::source::NumberSource;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn cli_parses_inline_number_source() {
@@ -195,5 +271,52 @@ mod tests {
                 panic!("expected inline source, got file: {}", path.display());
             }
         }
+    }
+
+    #[test]
+    fn cli_parses_range_factors_command() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "360",
+            "range-factors",
+            "--start",
+            "2",
+            "--end",
+            "12",
+        ]);
+        match cli.cmd {
+            Command::RangeFactors { start, end } => {
+                assert_eq!(start, 2);
+                assert_eq!(end, 12);
+            }
+            _ => panic!("expected range-factors command"),
+        }
+    }
+
+    #[test]
+    fn scan_factor_range_finds_expected_divisors() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "360").unwrap();
+        let stream = DecimalStream::open(file.path(), 16).unwrap();
+        let mut seen = Vec::new();
+        let cfg = Config::default();
+        let count = scan_factor_range(&stream, 2, 12, &cfg.policies, |factor| {
+            seen.push(factor);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 9);
+        assert_eq!(seen, vec![2, 3, 4, 5, 6, 8, 9, 10, 12]);
+    }
+
+    #[test]
+    fn scan_factor_range_rejects_zero_bound() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "10").unwrap();
+        let stream = DecimalStream::open(file.path(), 16).unwrap();
+        let cfg = Config::default();
+        let err = scan_factor_range(&stream, 0, 10, &cfg.policies, |_| Ok(())).unwrap_err();
+        assert!(err.to_string().contains("positive integers"));
     }
 }

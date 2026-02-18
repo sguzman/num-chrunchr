@@ -146,6 +146,7 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 - `analyze` — digit length + leading digits
 - `mod` — compute `N mod p` streaming
 - `div` — divide by a small `u32` divisor (streaming), write quotient to a file
+- `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks.
 - `peel` — run the streaming small-factor peeling strategy; progress is stored under `reports/` (see below).
 
 ### Examples (fish shell)
@@ -172,6 +173,12 @@ cargo run -- --input n.txt mod --p 97
 cargo run -- --input n.txt div --d 3 --out q.txt
 
 This writes quotient digits to q.txt and prints remainder=....
+
+    Range divisor scan:
+
+cargo run -- --input n.txt range-factors --start 2 --end 1000
+
+This prints a JSON array of all divisors from the inclusive range `[2, 1000]` without loading the whole number into RAM.
 
     Peel small factors and persist reports:
 
