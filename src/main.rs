@@ -82,6 +82,9 @@ enum Command {
         /// Return only the largest factor in the scan range
         #[arg(long, default_value_t = false)]
         last: bool,
+        /// Stop after this many matching factors have been emitted
+        #[arg(long)]
+        limit: Option<u64>,
         /// Use the batch remainder GPU engine for faster range scans
         #[arg(long, default_value_t = false)]
         use_gpu: bool,
@@ -181,6 +184,7 @@ fn main() -> Result<()> {
             all,
             first,
             last,
+            limit,
             use_gpu,
             gpu_batch_size,
         } => {
@@ -199,6 +203,7 @@ fn main() -> Result<()> {
                 all,
                 first,
                 last,
+                limit,
                 use_gpu,
                 gpu_batch_size.unwrap_or(config.range_factors.gpu_batch_size),
                 encoding,
@@ -292,6 +297,7 @@ fn run_range_factors(
     all: bool,
     first: bool,
     last: bool,
+    limit: Option<u64>,
     use_gpu: bool,
     gpu_batch_size: usize,
     encoding: NumberEncoding,
@@ -307,6 +313,7 @@ fn run_range_factors(
             all,
             use_gpu,
             gpu_batch_size,
+            limit,
             encoding,
             policies,
             |factor| {
@@ -334,6 +341,7 @@ fn run_range_factors(
             all,
             use_gpu,
             gpu_batch_size,
+            limit,
             encoding,
             policies,
             |factor| {
@@ -373,6 +381,7 @@ fn run_range_factors(
         all,
         use_gpu,
         gpu_batch_size,
+        limit,
         encoding,
         policies,
         |factor| {
@@ -392,6 +401,7 @@ fn run_range_factors(
         all,
         first,
         last,
+        limit,
         use_gpu,
         gpu_batch_size,
         encoding = ?encoding,
@@ -422,6 +432,7 @@ fn scan_factor_range<F>(
     all: bool,
     use_gpu: bool,
     gpu_batch_size: usize,
+    factor_limit: Option<u64>,
     encoding: NumberEncoding,
     policies: &config::PoliciesConfig,
     mut on_factor: F,
@@ -429,6 +440,9 @@ fn scan_factor_range<F>(
 where
     F: FnMut(u64) -> Result<FactorScanDecision>,
 {
+    if matches!(factor_limit, Some(0)) {
+        return Ok(0);
+    }
     if start == 0 || end == 0 {
         bail!("range bounds must be positive integers");
     }
@@ -454,6 +468,7 @@ where
                 gpu_end,
                 all,
                 gpu_batch_size,
+                factor_limit,
                 encoding,
                 &mut on_factor,
             )?;
@@ -473,6 +488,7 @@ where
                     tail_start,
                     end,
                     all,
+                    factor_limit,
                     encoding,
                     &mut on_factor,
                 )?;
@@ -487,6 +503,7 @@ where
         start,
         end,
         all,
+        factor_limit,
         encoding,
         &mut on_factor,
     )
@@ -499,6 +516,7 @@ fn scan_factor_range_batched<F>(
     end: u64,
     all: bool,
     gpu_batch_size: usize,
+    factor_limit: Option<u64>,
     encoding: NumberEncoding,
     on_factor: &mut F,
 ) -> Result<u64>
@@ -559,6 +577,9 @@ where
                     return Ok(found + 1);
                 }
                 found += 1;
+                if found == factor_limit.unwrap_or(u64::MAX) {
+                    return Ok(found);
+                }
                 continue;
             }
             if remainder != 0 {
@@ -569,6 +590,9 @@ where
                     return Ok(found + 1);
                 }
                 found += 1;
+                if found == factor_limit.unwrap_or(u64::MAX) {
+                    return Ok(found);
+                }
                 continue;
             }
             let mut power = divisor;
@@ -580,6 +604,9 @@ where
                     return Ok(found + 1);
                 }
                 found += 1;
+                if found == factor_limit.unwrap_or(u64::MAX) {
+                    return Ok(found);
+                }
                 match power.checked_mul(divisor) {
                     Some(next) => power = next,
                     None => break,
@@ -623,6 +650,7 @@ fn scan_factor_range_scalar<F>(
     start: u64,
     end: u64,
     all: bool,
+    factor_limit: Option<u64>,
     encoding: NumberEncoding,
     on_factor: &mut F,
 ) -> Result<u64>
@@ -636,6 +664,9 @@ where
                 return Ok(found + 1);
             }
             found += 1;
+            if found == factor_limit.unwrap_or(u64::MAX) {
+                return Ok(found);
+            }
             continue;
         }
         if !all {
@@ -644,6 +675,9 @@ where
                     return Ok(found + 1);
                 }
                 found += 1;
+                if found == factor_limit.unwrap_or(u64::MAX) {
+                    return Ok(found);
+                }
             }
             continue;
         }
@@ -658,6 +692,9 @@ where
                 return Ok(found + 1);
             }
             found += 1;
+            if found == factor_limit.unwrap_or(u64::MAX) {
+                return Ok(found);
+            }
             match power.checked_mul(divisor) {
                 Some(next) => power = next,
                 None => break,
@@ -800,6 +837,7 @@ mod tests {
                 all,
                 first,
                 last,
+                limit,
                 use_gpu,
                 gpu_batch_size,
             } => {
@@ -808,6 +846,7 @@ mod tests {
                 assert!(!all);
                 assert!(!first);
                 assert!(!last);
+                assert!(limit.is_none());
                 assert!(!use_gpu);
                 assert!(gpu_batch_size.is_none());
             }
@@ -833,15 +872,19 @@ mod tests {
             "--use-gpu",
             "--gpu-batch-size",
             "4096",
+            "--limit",
+            "3",
         ]);
         match cli.cmd {
             Command::RangeFactors {
                 use_gpu,
                 gpu_batch_size,
+                limit,
                 ..
             } => {
                 assert!(use_gpu);
                 assert_eq!(gpu_batch_size, Some(4096));
+                assert_eq!(limit, Some(3));
             }
             _ => panic!("expected range-factors command"),
         }
@@ -895,6 +938,7 @@ mod tests {
             false,
             false,
             0,
+            None,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -921,6 +965,7 @@ mod tests {
             true,
             false,
             0,
+            None,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -946,6 +991,7 @@ mod tests {
             false,
             false,
             0,
+            None,
             NumberEncoding::Decimal,
             &cfg.policies,
             |_| Ok(FactorScanDecision::Continue),
@@ -968,6 +1014,7 @@ mod tests {
             false,
             false,
             0,
+            None,
             NumberEncoding::BinaryBigEndian,
             &cfg.policies,
             |factor| {
@@ -994,6 +1041,7 @@ mod tests {
             false,
             false,
             0,
+            None,
             NumberEncoding::BinaryLittleEndian,
             &cfg.policies,
             |factor| {
@@ -1025,6 +1073,7 @@ mod tests {
             false,
             true,
             0,
+            None,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -1051,6 +1100,7 @@ mod tests {
             false,
             true,
             0,
+            None,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -1077,6 +1127,7 @@ mod tests {
             false,
             false,
             0,
+            None,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -1087,5 +1138,32 @@ mod tests {
         .unwrap();
         assert_eq!(count, 1);
         assert_eq!(seen, vec![2]);
+    }
+
+    #[test]
+    fn scan_factor_range_respects_limit() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "360").unwrap();
+        let cfg = Config::default();
+        let mut seen = Vec::new();
+        let count = scan_factor_range(
+            file.path(),
+            16,
+            2,
+            12,
+            false,
+            false,
+            0,
+            Some(2),
+            NumberEncoding::Decimal,
+            &cfg.policies,
+            |factor| {
+                seen.push(factor);
+                Ok(FactorScanDecision::Continue)
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(seen, vec![2, 3]);
     }
 }

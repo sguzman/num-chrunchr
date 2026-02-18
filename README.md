@@ -150,6 +150,7 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 - `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks (`--all` includes repeated factors for each divisor power that divides `N`), with optional GPU batch scanning via `--use-gpu`.
   - With `--use-gpu`, divisors up to `u32::MAX` are scanned on the GPU and larger divisors in the same request are scanned on CPU.
   - `--first` returns only the first factor found in ascending scan order; `--last` returns only the largest factor found in range.
+  - `--limit <N>` stops after `N` matching factors are emitted.
   - `--gpu-batch-size <N>` tunes divisors-per-GPU-chunk; `0` means auto-tune from adapter limits.
 - `peel` — run the streaming small-factor peeling strategy; progress is stored under `reports/` (see below).
 
@@ -199,6 +200,10 @@ This returns just the first factor in ascending order (or `null` if none are fou
 cargo run -- --input n.txt range-factors --start 2 --end 1000 --last
 
 This returns only the largest factor in range (or `null` if none are found).
+
+cargo run -- --input n.txt range-factors --start 2 --end 1000 --limit 3
+
+This stops after returning three matching factors.
 
 cargo run -- --input n.bin --binary range-factors --start 2 --end 1000 --use-gpu
 
