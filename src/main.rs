@@ -68,6 +68,12 @@ enum Command {
         /// Return repeated factors when higher powers of a divisor also divide N
         #[arg(long, default_value_t = false)]
         all: bool,
+        /// Stop after finding the first factor in the scan range
+        #[arg(long, default_value_t = false)]
+        first: bool,
+        /// Return only the largest factor in the scan range
+        #[arg(long, default_value_t = false)]
+        last: bool,
         /// Read --input as a raw binary integer (default is decimal digits)
         #[arg(long, default_value_t = false)]
         binary: bool,
@@ -136,10 +142,18 @@ fn main() -> Result<()> {
             start,
             end,
             all,
+            first,
+            last,
             binary,
             little_endian,
             use_gpu,
         } => {
+            if first && last {
+                bail!("--first and --last cannot be combined");
+            }
+            if all && (first || last) {
+                bail!("--all cannot be combined with --first or --last");
+            }
             if binary {
                 match &source {
                     NumberSource::File(_) => {}
@@ -167,6 +181,8 @@ fn main() -> Result<()> {
                 start,
                 end,
                 all,
+                first,
+                last,
                 use_gpu,
                 encoding,
                 &config.policies,
@@ -248,14 +264,78 @@ fn run_range_factors(
     start: u64,
     end: u64,
     all: bool,
+    first: bool,
+    last: bool,
     use_gpu: bool,
     encoding: NumberEncoding,
     policies: &config::PoliciesConfig,
 ) -> Result<()> {
+    if first {
+        let mut selected = None;
+        scan_factor_range(
+            input_path,
+            buffer_size,
+            start,
+            end,
+            all,
+            use_gpu,
+            encoding,
+            policies,
+            |factor| {
+                selected = Some(factor);
+                Ok(FactorScanDecision::Stop)
+            },
+        )?;
+        if let Some(value) = selected {
+            println!("{value}");
+            info!(start, end, value, "first factor scan complete");
+        } else {
+            println!("null");
+            info!(start, end, "first factor scan complete with no match");
+        }
+        return Ok(());
+    }
+
+    if last {
+        let mut selected = None;
+        let count = scan_factor_range(
+            input_path,
+            buffer_size,
+            start,
+            end,
+            all,
+            use_gpu,
+            encoding,
+            policies,
+            |factor| {
+                selected = Some(factor);
+                Ok(FactorScanDecision::Continue)
+            },
+        )?;
+        if let Some(value) = selected {
+            println!("{value}");
+            info!(
+                start,
+                end,
+                value,
+                factors_found = count,
+                "last factor scan complete"
+            );
+        } else {
+            println!("null");
+            info!(
+                start,
+                end,
+                factors_found = count,
+                "last factor scan complete with no match"
+            );
+        }
+        return Ok(());
+    }
+
     let mut stdout = std::io::stdout().lock();
     write!(stdout, "[")?;
-    let mut first = true;
-
+    let mut first_output = true;
     let count = scan_factor_range(
         input_path,
         buffer_size,
@@ -266,12 +346,12 @@ fn run_range_factors(
         encoding,
         policies,
         |factor| {
-            if !first {
+            if !first_output {
                 write!(stdout, ",")?;
             }
-            first = false;
+            first_output = false;
             write!(stdout, "{factor}")?;
-            Ok(())
+            Ok(FactorScanDecision::Continue)
         },
     )?;
 
@@ -280,6 +360,8 @@ fn run_range_factors(
         start,
         end,
         all,
+        first,
+        last,
         use_gpu,
         encoding = ?encoding,
         factors_found = count,
@@ -295,6 +377,12 @@ enum NumberEncoding {
     BinaryLittleEndian,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FactorScanDecision {
+    Continue,
+    Stop,
+}
+
 fn scan_factor_range<F>(
     input_path: &Path,
     buffer_size: usize,
@@ -307,7 +395,7 @@ fn scan_factor_range<F>(
     mut on_factor: F,
 ) -> Result<u64>
 where
-    F: FnMut(u64) -> Result<()>,
+    F: FnMut(u64) -> Result<FactorScanDecision>,
 {
     if start == 0 || end == 0 {
         bail!("range bounds must be positive integers");
@@ -381,7 +469,7 @@ fn scan_factor_range_batched<F>(
     on_factor: &mut F,
 ) -> Result<u64>
 where
-    F: FnMut(u64) -> Result<()>,
+    F: FnMut(u64) -> Result<FactorScanDecision>,
 {
     let mut found = 0u64;
     let mut chunk_start = start;
@@ -404,7 +492,9 @@ where
         for (&divisor_u32, &remainder) in divisors.iter().zip(remainders.iter()) {
             let divisor = divisor_u32 as u64;
             if divisor == 1 {
-                on_factor(1)?;
+                if on_factor(1)? == FactorScanDecision::Stop {
+                    return Ok(found + 1);
+                }
                 found += 1;
                 continue;
             }
@@ -412,7 +502,9 @@ where
                 continue;
             }
             if !all {
-                on_factor(divisor)?;
+                if on_factor(divisor)? == FactorScanDecision::Stop {
+                    return Ok(found + 1);
+                }
                 found += 1;
                 continue;
             }
@@ -421,7 +513,9 @@ where
                 if mod_from_file(input_path, buffer_size, power, encoding)? != 0 {
                     break;
                 }
-                on_factor(divisor)?;
+                if on_factor(divisor)? == FactorScanDecision::Stop {
+                    return Ok(found + 1);
+                }
                 found += 1;
                 match power.checked_mul(divisor) {
                     Some(next) => power = next,
@@ -447,18 +541,22 @@ fn scan_factor_range_scalar<F>(
     on_factor: &mut F,
 ) -> Result<u64>
 where
-    F: FnMut(u64) -> Result<()>,
+    F: FnMut(u64) -> Result<FactorScanDecision>,
 {
     let mut found = 0u64;
     for divisor in start..=end {
         if divisor == 1 {
-            on_factor(1)?;
+            if on_factor(1)? == FactorScanDecision::Stop {
+                return Ok(found + 1);
+            }
             found += 1;
             continue;
         }
         if !all {
             if mod_from_file(input_path, buffer_size, divisor, encoding)? == 0 {
-                on_factor(divisor)?;
+                if on_factor(divisor)? == FactorScanDecision::Stop {
+                    return Ok(found + 1);
+                }
                 found += 1;
             }
             continue;
@@ -470,7 +568,9 @@ where
             if mod_from_file(input_path, buffer_size, power, encoding)? != 0 {
                 break;
             }
-            on_factor(divisor)?;
+            if on_factor(divisor)? == FactorScanDecision::Stop {
+                return Ok(found + 1);
+            }
             found += 1;
             match power.checked_mul(divisor) {
                 Some(next) => power = next,
@@ -612,6 +712,8 @@ mod tests {
                 start,
                 end,
                 all,
+                first,
+                last,
                 binary,
                 little_endian,
                 use_gpu,
@@ -619,6 +721,8 @@ mod tests {
                 assert_eq!(start, 2);
                 assert_eq!(end, 12);
                 assert!(!all);
+                assert!(!first);
+                assert!(!last);
                 assert!(!binary);
                 assert!(!little_endian);
                 assert!(!use_gpu);
@@ -644,7 +748,7 @@ mod tests {
             &cfg.policies,
             |factor| {
                 seen.push(factor);
-                Ok(())
+                Ok(FactorScanDecision::Continue)
             },
         )
         .unwrap();
@@ -669,7 +773,7 @@ mod tests {
             &cfg.policies,
             |factor| {
                 seen.push(factor);
-                Ok(())
+                Ok(FactorScanDecision::Continue)
             },
         )
         .unwrap();
@@ -691,7 +795,7 @@ mod tests {
             false,
             NumberEncoding::Decimal,
             &cfg.policies,
-            |_| Ok(()),
+            |_| Ok(FactorScanDecision::Continue),
         )
         .unwrap_err();
         assert!(err.to_string().contains("positive integers"));
@@ -714,7 +818,7 @@ mod tests {
             &cfg.policies,
             |factor| {
                 seen.push(factor);
-                Ok(())
+                Ok(FactorScanDecision::Continue)
             },
         )
         .unwrap();
@@ -739,7 +843,7 @@ mod tests {
             &cfg.policies,
             |factor| {
                 seen.push(factor);
-                Ok(())
+                Ok(FactorScanDecision::Continue)
             },
         )
         .unwrap();
@@ -769,7 +873,7 @@ mod tests {
             &cfg.policies,
             |factor| {
                 seen.push(factor);
-                Ok(())
+                Ok(FactorScanDecision::Continue)
             },
         )
         .unwrap();
@@ -794,11 +898,36 @@ mod tests {
             &cfg.policies,
             |factor| {
                 seen.push(factor);
-                Ok(())
+                Ok(FactorScanDecision::Continue)
             },
         )
         .unwrap();
         assert_eq!(count, 0);
         assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn scan_factor_range_can_stop_after_first_factor() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "360").unwrap();
+        let cfg = Config::default();
+        let mut seen = Vec::new();
+        let count = scan_factor_range(
+            file.path(),
+            16,
+            2,
+            12,
+            false,
+            false,
+            NumberEncoding::Decimal,
+            &cfg.policies,
+            |factor| {
+                seen.push(factor);
+                Ok(FactorScanDecision::Stop)
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(seen, vec![2]);
     }
 }
