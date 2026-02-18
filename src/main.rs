@@ -8,9 +8,11 @@ use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Parser, Subcommand};
 use config::{Config, LoggingConfig};
 use gpu::batch_mod::{BatchModEngine, SymbolOrder};
+use num_bigint::BigUint;
 use repr::DecimalStream;
 use source::NumberSource;
 use std::{
+    fs,
     fs::File,
     io::{BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -66,6 +68,11 @@ enum Command {
     Analyze {
         #[arg(long)]
         leading: Option<usize>,
+    },
+    /// Convert raw binary input bytes to decimal text output
+    WriteDecimal {
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Scan an inclusive divisor range and print factors found in that range
     RangeFactors {
@@ -178,6 +185,10 @@ fn main() -> Result<()> {
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
             run_analyze(&stream, leading, &config.analysis)?;
         }
+        Command::WriteDecimal { out } => {
+            let prepared = source.prepare()?;
+            run_write_decimal_from_binary(&prepared.path, &out, encoding)?;
+        }
         Command::RangeFactors {
             start,
             end,
@@ -286,6 +297,39 @@ fn run_analyze(
     info!(decimal_len = len, leading_digits = %lead, "analysis complete");
     println!("decimal_len={len}");
     println!("leading_digits={lead}");
+    Ok(())
+}
+
+fn run_write_decimal_from_binary(
+    input_path: &Path,
+    out: &Path,
+    encoding: NumberEncoding,
+) -> Result<()> {
+    let bytes = fs::read(input_path)
+        .with_context(|| format!("failed to read binary input {}", input_path.display()))?;
+    let value = match encoding {
+        NumberEncoding::BinaryBigEndian => BigUint::from_bytes_be(&bytes),
+        NumberEncoding::BinaryLittleEndian => BigUint::from_bytes_le(&bytes),
+        NumberEncoding::Decimal => {
+            bail!("write-decimal requires --binary input (and optional --little-endian)")
+        }
+    };
+    let decimal = value.to_str_radix(10);
+    if let Some(parent) = out.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+    }
+    fs::write(out, decimal.as_bytes())
+        .with_context(|| format!("failed to write decimal output {}", out.display()))?;
+    info!(
+        input = %input_path.display(),
+        output = %out.display(),
+        bytes = bytes.len(),
+        decimal_digits = decimal.len(),
+        "write-decimal complete"
+    );
     Ok(())
 }
 
@@ -862,6 +906,26 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_write_decimal_command() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--input",
+            "n.bin",
+            "--binary",
+            "write-decimal",
+            "--out",
+            "n.txt",
+        ]);
+        match cli.cmd {
+            Command::WriteDecimal { out } => {
+                assert_eq!(out, PathBuf::from("n.txt"));
+            }
+            _ => panic!("expected write-decimal command"),
+        }
+        assert!(cli.binary);
+    }
+
+    #[test]
     fn cli_parses_range_factors_gpu_batch_override() {
         let cli = Cli::parse_from([
             "num-chrunchr",
@@ -1170,5 +1234,27 @@ mod tests {
         .unwrap();
         assert_eq!(count, 2);
         assert_eq!(seen, vec![2, 3]);
+    }
+
+    #[test]
+    fn write_decimal_from_binary_big_endian() {
+        let mut input = NamedTempFile::new().unwrap();
+        input.write_all(&[0x01, 0x00]).unwrap();
+        let out = NamedTempFile::new().unwrap();
+        run_write_decimal_from_binary(input.path(), out.path(), NumberEncoding::BinaryBigEndian)
+            .unwrap();
+        let text = std::fs::read_to_string(out.path()).unwrap();
+        assert_eq!(text, "256");
+    }
+
+    #[test]
+    fn write_decimal_from_binary_little_endian() {
+        let mut input = NamedTempFile::new().unwrap();
+        input.write_all(&[0x01, 0x00]).unwrap();
+        let out = NamedTempFile::new().unwrap();
+        run_write_decimal_from_binary(input.path(), out.path(), NumberEncoding::BinaryLittleEndian)
+            .unwrap();
+        let text = std::fs::read_to_string(out.path()).unwrap();
+        assert_eq!(text, "1");
     }
 }
