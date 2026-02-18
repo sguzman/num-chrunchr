@@ -485,7 +485,8 @@ where
     F: FnMut(u64) -> Result<FactorScanDecision>,
 {
     let start_time = Instant::now();
-    let batch_size = gpu_batch_size.max(1);
+    let requested_batch = gpu_batch_size.max(1);
+    let auto_batch = gpu_batch_size == 0;
     let mut found = 0u64;
     let mut chunk_start = start;
     let mut chunk_count = 0u64;
@@ -493,40 +494,42 @@ where
     let mut symbols_processed = 0u64;
     let mut update_ms = 0.0f64;
     let mut readback_ms = 0.0f64;
-    let mut engine: Option<BatchModEngine> = None;
-    let mut configured_batch = batch_size;
-    if gpu_batch_size == 0 {
-        configured_batch = gpu::batch_mod::GpuBatchModEngine::recommended_batch_size()?;
+    let bootstrap_batch = requested_batch.min((end - start + 1) as usize).max(1);
+    let bootstrap_end = start
+        .saturating_add(bootstrap_batch as u64 - 1)
+        .min(end)
+        .min(u32::MAX as u64);
+    let mut divisors: Vec<u32> = (chunk_start..=bootstrap_end).map(|d| d as u32).collect();
+    let mut engine = BatchModEngine::try_new(&divisors, true)?;
+    let mut configured_batch = requested_batch;
+    if auto_batch {
+        configured_batch = engine.recommended_batch_size().unwrap_or(requested_batch);
         info!(configured_batch, "auto-tuned GPU range batch size");
-    }
-    while chunk_start <= end {
-        chunk_count += 1;
-        let chunk_end = chunk_start
+        engine.ensure_capacity(configured_batch)?;
+        let tuned_end = chunk_start
             .saturating_add(configured_batch as u64 - 1)
             .min(end)
             .min(u32::MAX as u64);
-        let divisors: Vec<u32> = (chunk_start..=chunk_end).map(|d| d as u32).collect();
+        divisors = (chunk_start..=tuned_end).map(|d| d as u32).collect();
+        engine.reset_primes(&divisors)?;
+    }
+
+    while chunk_start <= end {
+        chunk_count += 1;
+        let chunk_end = divisors.last().copied().unwrap_or(chunk_start as u32) as u64;
         divisors_scanned += divisors.len() as u64;
-        if engine.is_none() {
-            engine = Some(BatchModEngine::try_new(&divisors, true)?);
-        } else if let Some(engine_ref) = engine.as_mut() {
-            engine_ref.reset_primes(&divisors)?;
-        }
-        let engine_ref = engine
-            .as_mut()
-            .expect("batch engine must exist after initialization");
         stream_symbols(input_path, buffer_size, encoding, |symbols| {
             if !symbols.is_empty() {
                 symbols_processed += symbols.len() as u64;
                 let (radix, order) = encoding_batch_params(encoding);
                 let update_start = Instant::now();
-                engine_ref.update_symbols(symbols, radix, order)?;
+                engine.update_symbols(symbols, radix, order)?;
                 update_ms += update_start.elapsed().as_secs_f64() * 1000.0;
             }
             Ok(())
         })?;
         let readback_start = Instant::now();
-        let remainders = engine_ref.remainders()?;
+        let remainders = engine.remainders()?;
         readback_ms += readback_start.elapsed().as_secs_f64() * 1000.0;
         for (&divisor_u32, &remainder) in divisors.iter().zip(remainders.iter()) {
             let divisor = divisor_u32 as u64;
@@ -566,6 +569,12 @@ where
             break;
         }
         chunk_start = chunk_end + 1;
+        let next_end = chunk_start
+            .saturating_add(configured_batch as u64 - 1)
+            .min(end)
+            .min(u32::MAX as u64);
+        divisors = (chunk_start..=next_end).map(|d| d as u32).collect();
+        engine.reset_primes(&divisors)?;
     }
     let elapsed = start_time.elapsed().as_secs_f64();
     let throughput = if elapsed > 0.0 {
