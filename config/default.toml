@@ -26,3 +26,7 @@ report_directory = "reports"
 sketch_primes = [2, 3, 5, 7, 11, 13, 17, 19]
 batch_size = 256
 use_gpu = true
+
+[range_factors]
+# 0 => auto-tune from detected GPU adapter limits.
+gpu_batch_size = 0

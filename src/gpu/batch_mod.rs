@@ -138,6 +138,13 @@ impl BatchModEngine {
             BatchModEngine::Gpu(engine) => engine.remainders(),
         }
     }
+
+    pub fn reset_primes(&mut self, primes: &[u32]) -> Result<()> {
+        match self {
+            BatchModEngine::Cpu(engine) => engine.reset_primes(primes),
+            BatchModEngine::Gpu(engine) => engine.reset_primes(primes),
+        }
+    }
 }
 
 pub struct CpuBatchModEngine {
@@ -188,6 +195,16 @@ impl CpuBatchModEngine {
     pub fn remainders(&self) -> Result<Vec<u32>> {
         Ok(self.remainders.clone())
     }
+
+    pub fn reset_primes(&mut self, primes: &[u32]) -> Result<()> {
+        self.primes.clear();
+        self.primes.extend_from_slice(primes);
+        self.remainders.resize(primes.len(), 0);
+        self.remainders.fill(0);
+        self.factors.resize(primes.len(), 1);
+        self.factors.fill(1);
+        Ok(())
+    }
 }
 
 pub struct GpuBatchModEngine {
@@ -197,9 +214,33 @@ pub struct GpuBatchModEngine {
     bind_group_layout: wgpu::BindGroupLayout,
     primes_buffer: wgpu::Buffer,
     prime_count: u32,
+    capacity: u32,
 }
 
 impl GpuBatchModEngine {
+    pub fn recommended_batch_size() -> Result<usize> {
+        let instance = wgpu::Instance::new(&InstanceDescriptor {
+            backends: Backends::all(),
+            flags: InstanceFlags::default(),
+            memory_budget_thresholds: MemoryBudgetThresholds::default(),
+            backend_options: BackendOptions::default(),
+        });
+        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .context("request GPU adapter for range batch tuning")?;
+        let limits = adapter.limits();
+        let entry_bytes = std::mem::size_of::<PrimeEntry>();
+        let by_storage = (limits.max_storage_buffer_binding_size as usize / entry_bytes).max(1);
+        let by_workgroups =
+            (limits.max_compute_workgroups_per_dimension as usize) * (WORKGROUP_SIZE as usize);
+        let max_supported = by_storage.min(by_workgroups).max(WORKGROUP_SIZE as usize);
+        let tuned = max_supported.min(262_144);
+        Ok((tuned / (WORKGROUP_SIZE as usize)).max(1) * (WORKGROUP_SIZE as usize))
+    }
+
     pub fn new(primes: &[u32]) -> Result<Self> {
         Self::new_with_force_fallback(primes, false)
     }
@@ -310,6 +351,7 @@ impl GpuBatchModEngine {
             bind_group_layout,
             primes_buffer,
             prime_count: primes.len() as u32,
+            capacity: primes.len() as u32,
         })
     }
 
@@ -430,11 +472,34 @@ impl GpuBatchModEngine {
         let data = slice.get_mapped_range();
         let remainders = bytemuck::cast_slice::<u8, PrimeEntry>(&data)
             .iter()
+            .take(self.prime_count as usize)
             .map(|entry| entry.remainder)
             .collect();
         drop(data);
         readback_buffer.unmap();
         Ok(remainders)
+    }
+
+    pub fn reset_primes(&mut self, primes: &[u32]) -> Result<()> {
+        if (primes.len() as u32) > self.capacity {
+            anyhow::bail!(
+                "GPU batch reset exceeds capacity: {} > {}",
+                primes.len(),
+                self.capacity
+            );
+        }
+        let entries: Vec<PrimeEntry> = primes
+            .iter()
+            .map(|&value| PrimeEntry {
+                value,
+                remainder: 0,
+                factor: 1,
+            })
+            .collect();
+        self.queue
+            .write_buffer(&self.primes_buffer, 0, bytemuck::cast_slice(&entries));
+        self.prime_count = primes.len() as u32;
+        Ok(())
     }
 }
 

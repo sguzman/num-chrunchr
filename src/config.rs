@@ -16,6 +16,7 @@ pub struct Config {
     pub analysis: AnalysisConfig,
     pub policies: PoliciesConfig,
     pub strategy: StrategyConfig,
+    pub range_factors: RangeFactorsConfig,
 }
 
 impl Default for Config {
@@ -26,7 +27,21 @@ impl Default for Config {
             analysis: AnalysisConfig::default(),
             policies: PoliciesConfig::default(),
             strategy: StrategyConfig::default(),
+            range_factors: RangeFactorsConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct RangeFactorsConfig {
+    /// 0 means auto-tune from GPU adapter limits.
+    pub gpu_batch_size: usize,
+}
+
+impl Default for RangeFactorsConfig {
+    fn default() -> Self {
+        Self { gpu_batch_size: 0 }
     }
 }
 
@@ -181,6 +196,7 @@ mod tests {
         assert_eq!(cfg.policies.ecm.b2, 100_000);
         assert_eq!(cfg.policies.ecm.max_curve, 256);
         assert_eq!(cfg.policies.ecm.seed, 1234);
+        assert_eq!(cfg.range_factors.gpu_batch_size, 0);
     }
 
     #[test]
@@ -214,6 +230,8 @@ mod tests {
             sketch_primes = [2,3,5]
             batch_size = 512
             use_gpu = true
+            [range_factors]
+            gpu_batch_size = 8192
         "#,
         )
         .unwrap();
@@ -238,5 +256,6 @@ mod tests {
         assert_eq!(cfg.strategy.sketch_primes, vec![2, 3, 5]);
         assert_eq!(cfg.strategy.batch_size, 512);
         assert!(cfg.strategy.use_gpu);
+        assert_eq!(cfg.range_factors.gpu_batch_size, 8192);
     }
 }

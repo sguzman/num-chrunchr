@@ -149,6 +149,7 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 - `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks (`--all` includes repeated factors for each divisor power that divides `N`). Supports decimal input (default) and raw binary input (`--binary`, default big-endian, optional `--little-endian`), and supports GPU batch scanning with `--use-gpu`.
   - With `--use-gpu`, divisors up to `u32::MAX` are scanned on the GPU and larger divisors in the same request are scanned on CPU.
   - `--first` returns only the first factor found in ascending scan order; `--last` returns only the largest factor found in range.
+  - `--gpu-batch-size <N>` tunes divisors-per-GPU-chunk; `0` means auto-tune from adapter limits.
 - `peel` — run the streaming small-factor peeling strategy; progress is stored under `reports/` (see below).
 
 ### Examples (fish shell)
@@ -202,6 +203,10 @@ cargo run -- --input n.bin range-factors --start 2 --end 1000 --binary --little-
 
 This reads the same raw bytes as little-endian.
 
+cargo run -- --input n.txt range-factors --start 2 --end 10000000 --use-gpu --gpu-batch-size 65536
+
+This overrides the GPU divisor chunk size for throughput tuning.
+
     Peel small factors and persist reports:
 
 cargo run -- --input n.txt peel --primes-limit 500
@@ -224,6 +229,7 @@ The next peel invocation will detect these files and resume from the last known 
 - `policies` (modulus/divisor limits, division budget).
 - `policies.ecm` (enable/disable ECM, adjust stage 1/2 bounds, curve budget, and RNG seed for the Lenstra fallback that runs after the RAM upgrade when Pollard/p±1 stall).
 - `strategy` — `primes_limit`, `batch_size`, `report_directory`, `sketch_primes`, and `use_gpu` control how aggressively `peel` sieves, how many primes are grouped for each batch scan, where state is persisted, and whether the GPU-backed batch modulo kernel is engaged.
+- `range_factors` — `gpu_batch_size` controls `range-factors --use-gpu` chunking (`0` auto-tunes from adapter limits).
 
 ### GPU acceleration
 
