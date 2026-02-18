@@ -86,6 +86,9 @@ enum Command {
         /// Stop after finding the first factor in the scan range
         #[arg(long, default_value_t = false)]
         first: bool,
+        /// Favor lower latency for --first by reducing GPU auto-batch size
+        #[arg(long, default_value_t = false)]
+        low_latency_first: bool,
         /// Return only the largest factor in the scan range
         #[arg(long, default_value_t = false)]
         last: bool,
@@ -194,6 +197,7 @@ fn main() -> Result<()> {
             end,
             all,
             first,
+            low_latency_first,
             last,
             limit,
             use_gpu,
@@ -213,6 +217,7 @@ fn main() -> Result<()> {
                 end,
                 all,
                 first,
+                low_latency_first,
                 last,
                 limit,
                 use_gpu,
@@ -340,6 +345,7 @@ fn run_range_factors(
     end: u64,
     all: bool,
     first: bool,
+    low_latency_first: bool,
     last: bool,
     limit: Option<u64>,
     use_gpu: bool,
@@ -358,6 +364,7 @@ fn run_range_factors(
             use_gpu,
             gpu_batch_size,
             Some(1),
+            low_latency_first,
             encoding,
             policies,
             |factor| {
@@ -386,6 +393,7 @@ fn run_range_factors(
             use_gpu,
             gpu_batch_size,
             limit,
+            low_latency_first,
             encoding,
             policies,
             |factor| {
@@ -426,6 +434,7 @@ fn run_range_factors(
         use_gpu,
         gpu_batch_size,
         limit,
+        low_latency_first,
         encoding,
         policies,
         |factor| {
@@ -444,6 +453,7 @@ fn run_range_factors(
         end,
         all,
         first,
+        low_latency_first,
         last,
         limit,
         use_gpu,
@@ -477,6 +487,7 @@ fn scan_factor_range<F>(
     use_gpu: bool,
     gpu_batch_size: usize,
     factor_limit: Option<u64>,
+    low_latency_first: bool,
     encoding: NumberEncoding,
     policies: &config::PoliciesConfig,
     mut on_factor: F,
@@ -513,6 +524,7 @@ where
                 all,
                 gpu_batch_size,
                 factor_limit,
+                low_latency_first,
                 encoding,
                 &mut on_factor,
             )?;
@@ -561,6 +573,7 @@ fn scan_factor_range_batched<F>(
     all: bool,
     gpu_batch_size: usize,
     factor_limit: Option<u64>,
+    low_latency_first: bool,
     encoding: NumberEncoding,
     on_factor: &mut F,
 ) -> Result<u64>
@@ -587,7 +600,7 @@ where
     let mut engine = BatchModEngine::try_new(&divisors, true)?;
     let mut configured_batch = requested_batch;
     if auto_batch {
-        if factor_limit == Some(1) {
+        if factor_limit == Some(1) && low_latency_first {
             configured_batch = FIRST_FACTOR_BATCH_SIZE;
         } else {
             configured_batch = engine.recommended_batch_size().unwrap_or(requested_batch);
@@ -885,6 +898,7 @@ mod tests {
                 end,
                 all,
                 first,
+                low_latency_first,
                 last,
                 limit,
                 use_gpu,
@@ -894,6 +908,7 @@ mod tests {
                 assert_eq!(end, 12);
                 assert!(!all);
                 assert!(!first);
+                assert!(!low_latency_first);
                 assert!(!last);
                 assert!(limit.is_none());
                 assert!(!use_gpu);
@@ -947,11 +962,13 @@ mod tests {
         match cli.cmd {
             Command::RangeFactors {
                 use_gpu,
+                low_latency_first,
                 gpu_batch_size,
                 limit,
                 ..
             } => {
                 assert!(use_gpu);
+                assert!(!low_latency_first);
                 assert_eq!(gpu_batch_size, Some(4096));
                 assert_eq!(limit, Some(3));
             }
@@ -959,6 +976,37 @@ mod tests {
         }
         assert!(cli.binary);
         assert!(cli.little_endian);
+    }
+
+    #[test]
+    fn cli_parses_low_latency_first_flag() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--input",
+            "n.bin",
+            "--binary",
+            "range-factors",
+            "--start",
+            "2",
+            "--end",
+            "1000",
+            "--first",
+            "--low-latency-first",
+            "--use-gpu",
+        ]);
+        match cli.cmd {
+            Command::RangeFactors {
+                first,
+                low_latency_first,
+                use_gpu,
+                ..
+            } => {
+                assert!(first);
+                assert!(low_latency_first);
+                assert!(use_gpu);
+            }
+            _ => panic!("expected range-factors command"),
+        }
     }
 
     #[test]
@@ -1008,6 +1056,7 @@ mod tests {
             false,
             0,
             None,
+            false,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -1035,6 +1084,7 @@ mod tests {
             false,
             0,
             None,
+            false,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -1061,6 +1111,7 @@ mod tests {
             false,
             0,
             None,
+            false,
             NumberEncoding::Decimal,
             &cfg.policies,
             |_| Ok(FactorScanDecision::Continue),
@@ -1084,6 +1135,7 @@ mod tests {
             false,
             0,
             None,
+            false,
             NumberEncoding::BinaryBigEndian,
             &cfg.policies,
             |factor| {
@@ -1111,6 +1163,7 @@ mod tests {
             false,
             0,
             None,
+            false,
             NumberEncoding::BinaryLittleEndian,
             &cfg.policies,
             |factor| {
@@ -1143,6 +1196,7 @@ mod tests {
             true,
             0,
             None,
+            false,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -1170,6 +1224,7 @@ mod tests {
             true,
             0,
             None,
+            false,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -1197,6 +1252,7 @@ mod tests {
             false,
             0,
             None,
+            false,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
@@ -1224,6 +1280,7 @@ mod tests {
             false,
             0,
             Some(2),
+            false,
             NumberEncoding::Decimal,
             &cfg.policies,
             |factor| {
