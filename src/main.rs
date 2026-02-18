@@ -313,7 +313,7 @@ fn run_range_factors(
             all,
             use_gpu,
             gpu_batch_size,
-            limit,
+            Some(1),
             encoding,
             policies,
             |factor| {
@@ -523,6 +523,7 @@ fn scan_factor_range_batched<F>(
 where
     F: FnMut(u64) -> Result<FactorScanDecision>,
 {
+    const FIRST_FACTOR_BATCH_SIZE: usize = 4096;
     let start_time = Instant::now();
     let requested_batch = gpu_batch_size.max(1);
     let auto_batch = gpu_batch_size == 0;
@@ -542,7 +543,11 @@ where
     let mut engine = BatchModEngine::try_new(&divisors, true)?;
     let mut configured_batch = requested_batch;
     if auto_batch {
-        configured_batch = engine.recommended_batch_size().unwrap_or(requested_batch);
+        if factor_limit == Some(1) {
+            configured_batch = FIRST_FACTOR_BATCH_SIZE;
+        } else {
+            configured_batch = engine.recommended_batch_size().unwrap_or(requested_batch);
+        }
         info!(configured_batch, "auto-tuned GPU range batch size");
         engine.ensure_capacity(configured_batch)?;
         let tuned_end = chunk_start
