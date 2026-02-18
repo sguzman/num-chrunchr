@@ -321,53 +321,54 @@ where
         }
     }
 
-    if use_gpu && end > u32::MAX as u64 {
-        bail!("--use-gpu only supports divisors up to {}", u32::MAX);
-    }
-
     if use_gpu {
-        return scan_factor_range_batched(
-            input_path,
-            buffer_size,
-            start,
-            end,
-            all,
-            true,
-            encoding,
-            &mut on_factor,
-        );
-    }
+        let mut found = 0u64;
+        let gpu_limit = u32::MAX as u64;
+        let gpu_end = end.min(gpu_limit);
 
-    let mut found = 0u64;
-    for divisor in start..=end {
-        if divisor == 1 {
-            on_factor(1)?;
-            found += 1;
-            continue;
-        }
-        if !all {
-            if mod_from_file(input_path, buffer_size, divisor, encoding)? == 0 {
-                on_factor(divisor)?;
-                found += 1;
-            }
-            continue;
+        if start <= gpu_end {
+            found += scan_factor_range_batched(
+                input_path,
+                buffer_size,
+                start,
+                gpu_end,
+                all,
+                encoding,
+                &mut on_factor,
+            )?;
         }
 
-        // In --all mode, emit the divisor once for each power d^k that divides N.
-        let mut power = divisor;
-        loop {
-            if mod_from_file(input_path, buffer_size, power, encoding)? != 0 {
-                break;
-            }
-            on_factor(divisor)?;
-            found += 1;
-            match power.checked_mul(divisor) {
-                Some(next) => power = next,
-                None => break,
+        if end > gpu_limit {
+            let tail_start = start.max(gpu_limit.saturating_add(1));
+            if tail_start <= end {
+                info!(
+                    tail_start,
+                    tail_end = end,
+                    "range exceeds GPU divisor width; scanning tail on CPU"
+                );
+                found += scan_factor_range_scalar(
+                    input_path,
+                    buffer_size,
+                    tail_start,
+                    end,
+                    all,
+                    encoding,
+                    &mut on_factor,
+                )?;
             }
         }
+        return Ok(found);
     }
-    Ok(found)
+
+    scan_factor_range_scalar(
+        input_path,
+        buffer_size,
+        start,
+        end,
+        all,
+        encoding,
+        &mut on_factor,
+    )
 }
 
 fn scan_factor_range_batched<F>(
@@ -376,7 +377,6 @@ fn scan_factor_range_batched<F>(
     start: u64,
     end: u64,
     all: bool,
-    use_gpu: bool,
     encoding: NumberEncoding,
     on_factor: &mut F,
 ) -> Result<u64>
@@ -392,7 +392,7 @@ where
             .min(end)
             .min(u32::MAX as u64);
         let divisors: Vec<u32> = (chunk_start..=chunk_end).map(|d| d as u32).collect();
-        let mut engine = BatchModEngine::try_new(&divisors, use_gpu)?;
+        let mut engine = BatchModEngine::try_new(&divisors, true)?;
         stream_symbols(input_path, buffer_size, encoding, |symbols| {
             if !symbols.is_empty() {
                 let (radix, order) = encoding_batch_params(encoding);
@@ -433,6 +433,50 @@ where
             break;
         }
         chunk_start = chunk_end + 1;
+    }
+    Ok(found)
+}
+
+fn scan_factor_range_scalar<F>(
+    input_path: &Path,
+    buffer_size: usize,
+    start: u64,
+    end: u64,
+    all: bool,
+    encoding: NumberEncoding,
+    on_factor: &mut F,
+) -> Result<u64>
+where
+    F: FnMut(u64) -> Result<()>,
+{
+    let mut found = 0u64;
+    for divisor in start..=end {
+        if divisor == 1 {
+            on_factor(1)?;
+            found += 1;
+            continue;
+        }
+        if !all {
+            if mod_from_file(input_path, buffer_size, divisor, encoding)? == 0 {
+                on_factor(divisor)?;
+                found += 1;
+            }
+            continue;
+        }
+
+        // In --all mode, emit the divisor once for each power d^k that divides N.
+        let mut power = divisor;
+        loop {
+            if mod_from_file(input_path, buffer_size, power, encoding)? != 0 {
+                break;
+            }
+            on_factor(divisor)?;
+            found += 1;
+            match power.checked_mul(divisor) {
+                Some(next) => power = next,
+                None => break,
+            }
+        }
     }
     Ok(found)
 }
@@ -731,5 +775,30 @@ mod tests {
         .unwrap();
         assert_eq!(count, 9);
         assert_eq!(seen, vec![2, 3, 4, 5, 6, 8, 9, 10, 12]);
+    }
+
+    #[test]
+    fn scan_factor_range_use_gpu_handles_u64_tail_on_cpu() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "10").unwrap();
+        let cfg = Config::default();
+        let mut seen = Vec::new();
+        let count = scan_factor_range(
+            file.path(),
+            16,
+            u32::MAX as u64 + 1,
+            u32::MAX as u64 + 2,
+            false,
+            true,
+            NumberEncoding::Decimal,
+            &cfg.policies,
+            |factor| {
+                seen.push(factor);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 0);
+        assert!(seen.is_empty());
     }
 }

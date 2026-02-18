@@ -82,6 +82,7 @@ impl DecimalStream {
         Ok(out)
     }
 
+    #[allow(dead_code)]
     pub fn mod_u32(&self, p: u32) -> Result<u32> {
         anyhow::ensure!(p != 0, "modulus p must be nonzero");
         let mut reader = self.open_reader()?;

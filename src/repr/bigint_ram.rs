@@ -48,6 +48,7 @@ impl BigIntRam {
         &self.value
     }
 
+    #[allow(dead_code)]
     pub fn to_decimal_string(&self) -> String {
         self.value.to_str_radix(10)
     }

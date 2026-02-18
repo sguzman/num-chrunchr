@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::BigIntRam;
 use anyhow::{Context, Result};
 use num_bigint::BigUint;

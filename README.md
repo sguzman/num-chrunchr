@@ -147,6 +147,7 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 - `mod` — compute `N mod p` streaming
 - `div` — divide by a small `u32` divisor (streaming), write quotient to a file
 - `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks (`--all` includes repeated factors for each divisor power that divides `N`). Supports decimal input (default) and raw binary input (`--binary`, default big-endian, optional `--little-endian`), and supports GPU batch scanning with `--use-gpu`.
+  - With `--use-gpu`, divisors up to `u32::MAX` are scanned on the GPU and larger divisors in the same request are scanned on CPU.
 - `peel` — run the streaming small-factor peeling strategy; progress is stored under `reports/` (see below).
 
 ### Examples (fish shell)

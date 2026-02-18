@@ -313,10 +313,6 @@ impl GpuBatchModEngine {
         })
     }
 
-    pub fn update(&mut self, digits: &[u32]) -> Result<()> {
-        self.update_symbols(digits, 10, SymbolOrder::BigEndian)
-    }
-
     pub fn update_symbols(
         &mut self,
         symbols: &[u32],
@@ -450,7 +446,9 @@ mod tests {
     fn cpu_batch_engine_updates_remainders() {
         let primes = vec![2, 3, 5];
         let mut engine = BatchModEngine::try_new(&primes, false).unwrap();
-        engine.update(&[1, 2, 3]).unwrap();
+        engine
+            .update_symbols(&[1, 2, 3], 10, SymbolOrder::BigEndian)
+            .unwrap();
         let remainders = engine.remainders().unwrap();
         assert_eq!(remainders, vec![123 % 2, 123 % 3, 123 % 5]);
     }
@@ -465,7 +463,9 @@ mod tests {
                 return;
             }
         };
-        engine.update(&[1, 2, 3]).unwrap();
+        engine
+            .update_symbols(&[1, 2, 3], 10, SymbolOrder::BigEndian)
+            .unwrap();
         let remainders = engine.remainders().unwrap();
         assert_eq!(remainders, vec![123 % 2, 123 % 3, 123 % 5]);
     }
