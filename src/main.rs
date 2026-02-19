@@ -503,8 +503,7 @@ fn input_decimal_digits(path: &Path, buffer_size: usize, encoding: NumberEncodin
             Ok(stream.decimal_len()?)
         }
         NumberEncoding::BinaryBigEndian | NumberEncoding::BinaryLittleEndian => {
-            let value = load_biguint_from_input(path, buffer_size, encoding)?;
-            Ok(value.to_str_radix(10).len() as u64)
+            binary_decimal_digits(path)
         }
     }
 }
@@ -766,16 +765,50 @@ fn estimate_digits_from_input(
             Ok(len)
         }
         NumberEncoding::BinaryBigEndian | NumberEncoding::BinaryLittleEndian => {
-            let bytes = std::fs::metadata(path)
-                .with_context(|| format!("failed to stat {}", path.display()))?
-                .len();
-            if bytes == 0 {
-                return Ok(1);
-            }
-            let digits = ((bytes as f64) * 8.0 * std::f64::consts::LOG10_2).floor() as u64 + 1;
-            Ok(digits.max(1))
+            binary_decimal_digits(path)
         }
     }
+}
+
+fn binary_decimal_digits(path: &Path) -> Result<u64> {
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    let file_len = metadata.len();
+    if file_len == 0 {
+        return Ok(1);
+    }
+
+    let mut reader = BufReader::new(
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?,
+    );
+    let mut consumed = 0u64;
+    let mut first_non_zero = None;
+    let mut buf = [0u8; 8192];
+    while consumed < file_len {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        for (idx, b) in buf[..read].iter().enumerate() {
+            if *b != 0 {
+                first_non_zero = Some((consumed + idx as u64, *b));
+                break;
+            }
+        }
+        if first_non_zero.is_some() {
+            break;
+        }
+        consumed += read as u64;
+    }
+
+    let Some((offset, first_byte)) = first_non_zero else {
+        return Ok(1);
+    };
+    let remaining_bytes = file_len - offset;
+    let leading_bits = 8u32 - first_byte.leading_zeros();
+    let bit_len = (remaining_bytes - 1) * 8 + leading_bits as u64;
+    let digits = ((bit_len - 1) as f64 * std::f64::consts::LOG10_2).floor() as u64 + 1;
+    Ok(digits.max(1))
 }
 
 fn default_max_divisor_for_digits(digits: u64) -> u64 {
@@ -1782,6 +1815,13 @@ mod tests {
         let value = BigUint::from(1000u64);
         let log10 = log_biguint_base(&value, 10.0).unwrap();
         assert!((log10 - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn binary_decimal_digits_handles_leading_zero_bytes() {
+        let mut binary_file = NamedTempFile::new().unwrap();
+        binary_file.write_all(&[0x00, 0x00, 0x01]).unwrap();
+        assert_eq!(binary_decimal_digits(binary_file.path()).unwrap(), 1);
     }
 
     #[test]
