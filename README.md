@@ -148,6 +148,7 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 - `mod` — compute `N mod p` streaming
 - `div` — divide by a small `u32` divisor (streaming), write quotient to a file
 - `write-decimal` — convert raw binary input bytes into decimal text output (`--binary`, optional `--little-endian`)
+- `estimate-any-factor` — estimate trial-division scan time and likely success for finding any factor (supports `--digits` without an input file)
 - `range-factors` — scan an inclusive integer range and return divisors in that range using streaming modulus checks (`--all` includes repeated factors for each divisor power that divides `N`), with optional GPU batch scanning via `--use-gpu`.
   - With `--use-gpu`, divisors up to `u32::MAX` are scanned on the GPU and larger divisors in the same request are scanned on CPU.
   - `--first` returns only the first factor found in ascending scan order; `--last` returns only the largest factor found in range.
@@ -187,7 +188,15 @@ cargo run -- --input n.txt div --d 3 --out q.txt
 
 This writes quotient digits to q.txt and prints remainder=....
 
-`div`, `analyze`, and `peel` currently support decimal input only; `--binary` is supported by `mod`, `write-decimal`, and `range-factors`.
+`div`, `analyze`, and `peel` currently support decimal input only; `--binary` is supported by `mod`, `write-decimal`, `estimate-any-factor`, and `range-factors`.
+
+    Any-factor estimate:
+
+cargo run -- estimate-any-factor --digits 1000000 --factors-per-sec 350000000 --mode unknown
+
+cargo run -- --input n.bin --binary estimate-any-factor --max-divisor 100000000000 --factors-per-sec 350000000 --mode random
+
+This reports estimated scan time and, for random mode, an approximate success probability of hitting a small factor under the scan cutoff.
 
     Range divisor scan:
 

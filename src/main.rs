@@ -24,7 +24,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Parser)]
 #[command(name = "num-chrunchr")]
 #[command(about = "Streaming factoring + number structure toolkit", long_about = None)]
-#[command(group(ArgGroup::new("source").required(true).args(["input", "number"])))]
+#[command(group(ArgGroup::new("source").args(["input", "number"])))]
 struct Cli {
     /// Path to configuration TOML (defaults to config/default.toml)
     #[arg(long)]
@@ -74,6 +74,21 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Estimate time/probability to find any factor under a scan budget
+    EstimateAnyFactor {
+        /// Number of decimal digits (use instead of --input/--number)
+        #[arg(long)]
+        digits: Option<u64>,
+        /// Divisor scan cutoff used for the estimate
+        #[arg(long)]
+        max_divisor: Option<u64>,
+        /// Tested divisor throughput (divisors/sec)
+        #[arg(long)]
+        factors_per_sec: Option<f64>,
+        /// Estimation mode for success assumptions
+        #[arg(long, value_enum, default_value_t = EstimateMode::Unknown)]
+        mode: EstimateMode,
+    },
     /// Scan an inclusive divisor range and print factors found in that range
     RangeFactors {
         #[arg(long)]
@@ -112,23 +127,26 @@ enum Command {
 }
 
 impl Cli {
-    fn number_source(&self) -> Result<NumberSource> {
+    fn number_source(&self) -> Result<Option<NumberSource>> {
         match (&self.input, &self.number) {
-            (Some(path), None) => Ok(NumberSource::File(path.clone())),
-            (None, Some(text)) => Ok(NumberSource::Inline(text.clone())),
+            (Some(path), None) => Ok(Some(NumberSource::File(path.clone()))),
+            (None, Some(text)) => Ok(Some(NumberSource::Inline(text.clone()))),
             (Some(_), Some(_)) => bail!("cannot use --input and --number together"),
-            (None, None) => bail!("provide --input or --number"),
+            (None, None) => Ok(None),
         }
     }
 
-    fn encoding(&self, source: &NumberSource) -> Result<NumberEncoding> {
+    fn encoding(&self, source: Option<&NumberSource>) -> Result<NumberEncoding> {
         if self.little_endian && !self.binary {
             bail!("--little-endian is only valid with --binary");
         }
         if self.binary {
             match source {
-                NumberSource::File(_) => {}
-                NumberSource::Inline(_) => {
+                Some(NumberSource::File(_)) => {}
+                Some(NumberSource::Inline(_)) => {
+                    bail!("--binary requires --input with a file path");
+                }
+                None => {
                     bail!("--binary requires --input with a file path");
                 }
             }
@@ -146,7 +164,7 @@ impl Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let source = cli.number_source()?;
-    let encoding = cli.encoding(&source)?;
+    let encoding = cli.encoding(source.as_ref())?;
     let config = Config::load(cli.config.as_deref())?;
     init_logging(&config.logging)?;
     info!(
@@ -155,12 +173,18 @@ fn main() -> Result<()> {
         "configuration instantiated"
     );
 
-    let input_label = source.label();
+    let input_label = source
+        .as_ref()
+        .map(NumberSource::label)
+        .unwrap_or_else(|| "none".to_string());
     info!(input = %input_label, command = ?cli.cmd, "processing request");
     let start = Instant::now();
 
     match cli.cmd {
         Command::Mod { p } => {
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
             let prepared = source.prepare()?;
             run_mod_from_file(
                 &prepared.path,
@@ -174,6 +198,9 @@ fn main() -> Result<()> {
             if encoding != NumberEncoding::Decimal {
                 bail!("div command currently supports decimal input only");
             }
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
             let prepared = source.prepare()?;
             let stream = DecimalStream::from_config(&prepared.path, &config.stream)
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
@@ -183,14 +210,38 @@ fn main() -> Result<()> {
             if encoding != NumberEncoding::Decimal {
                 bail!("analyze command currently supports decimal input only");
             }
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
             let prepared = source.prepare()?;
             let stream = DecimalStream::from_config(&prepared.path, &config.stream)
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
             run_analyze(&stream, leading, &config.analysis)?;
         }
         Command::WriteDecimal { out } => {
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
             let prepared = source.prepare()?;
             run_write_decimal_from_binary(&prepared.path, &out, encoding)?;
+        }
+        Command::EstimateAnyFactor {
+            digits,
+            max_divisor,
+            factors_per_sec,
+            mode,
+        } => {
+            let prepared = source.as_ref().map(NumberSource::prepare).transpose()?;
+            let path = prepared.as_ref().map(|p| p.path.as_path());
+            run_estimate_any_factor(
+                path,
+                config.stream.buffer_size,
+                encoding,
+                digits,
+                max_divisor,
+                factors_per_sec,
+                mode,
+            )?;
         }
         Command::RangeFactors {
             start,
@@ -209,6 +260,9 @@ fn main() -> Result<()> {
             if all && (first || last) {
                 bail!("--all cannot be combined with --first or --last");
             }
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
             let prepared = source.prepare()?;
             run_range_factors(
                 &prepared.path,
@@ -233,7 +287,10 @@ fn main() -> Result<()> {
             if encoding != NumberEncoding::Decimal {
                 bail!("peel command currently supports decimal input only");
             }
-            strategy::run_peel(&source, &config, primes_limit, reset)?;
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
+            strategy::run_peel(source, &config, primes_limit, reset)?;
         }
     }
 
@@ -334,6 +391,85 @@ fn run_write_decimal_from_binary(
         bytes = bytes.len(),
         decimal_digits = decimal.len(),
         "write-decimal complete"
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum EstimateMode {
+    Random,
+    Adversarial,
+    Unknown,
+}
+
+fn run_estimate_any_factor(
+    input_path: Option<&Path>,
+    buffer_size: usize,
+    encoding: NumberEncoding,
+    digits: Option<u64>,
+    max_divisor: Option<u64>,
+    factors_per_sec: Option<f64>,
+    mode: EstimateMode,
+) -> Result<()> {
+    if digits.is_some() && input_path.is_some() {
+        bail!("use either --digits or --input/--number for estimate-any-factor");
+    }
+    let digits = if let Some(digits) = digits {
+        if digits == 0 {
+            bail!("--digits must be > 0");
+        }
+        digits
+    } else if let Some(path) = input_path {
+        estimate_digits_from_input(path, buffer_size, encoding)?
+    } else {
+        bail!("estimate-any-factor requires --digits or an input source");
+    };
+
+    let max_divisor = max_divisor.unwrap_or_else(|| default_max_divisor_for_digits(digits));
+    if max_divisor < 2 {
+        bail!("--max-divisor must be >= 2");
+    }
+    let factors_per_sec = factors_per_sec.unwrap_or(350_000_000.0);
+    if !factors_per_sec.is_finite() || factors_per_sec <= 0.0 {
+        bail!("--factors-per-sec must be a positive finite number");
+    }
+
+    let seconds = max_divisor as f64 / factors_per_sec;
+    let eta = format_duration(seconds);
+    let random_prob = random_small_factor_probability(max_divisor);
+
+    println!("digits={digits}");
+    println!("max_divisor={max_divisor}");
+    println!("factors_per_sec={factors_per_sec}");
+    println!("scan_seconds={seconds:.3}");
+    println!("scan_eta={eta}");
+
+    match mode {
+        EstimateMode::Random => {
+            println!("mode=random");
+            println!("estimated_success_probability={random_prob:.6}");
+            println!("assumption=random integer; approximation via Mertens product");
+        }
+        EstimateMode::Adversarial => {
+            println!("mode=adversarial");
+            println!("estimated_success_probability=unknown");
+            println!("assumption=adversarial input; only scan-time estimate is reliable");
+        }
+        EstimateMode::Unknown => {
+            println!("mode=unknown");
+            println!("estimated_success_probability_random={random_prob:.6}");
+            println!("estimated_success_probability_adversarial=unknown");
+        }
+    }
+
+    info!(
+        digits,
+        max_divisor,
+        factors_per_sec,
+        scan_seconds = seconds,
+        mode = ?mode,
+        random_probability = random_prob,
+        "any-factor estimate complete"
     );
     Ok(())
 }
@@ -476,6 +612,72 @@ enum NumberEncoding {
 enum FactorScanDecision {
     Continue,
     Stop,
+}
+
+fn estimate_digits_from_input(
+    path: &Path,
+    buffer_size: usize,
+    encoding: NumberEncoding,
+) -> Result<u64> {
+    match encoding {
+        NumberEncoding::Decimal => {
+            let stream = DecimalStream::open(path, buffer_size)?;
+            let len = stream.decimal_len()?;
+            if len == 0 {
+                bail!("input has no decimal digits");
+            }
+            Ok(len)
+        }
+        NumberEncoding::BinaryBigEndian | NumberEncoding::BinaryLittleEndian => {
+            let bytes = std::fs::metadata(path)
+                .with_context(|| format!("failed to stat {}", path.display()))?
+                .len();
+            if bytes == 0 {
+                return Ok(1);
+            }
+            let digits = ((bytes as f64) * 8.0 * std::f64::consts::LOG10_2).floor() as u64 + 1;
+            Ok(digits.max(1))
+        }
+    }
+}
+
+fn default_max_divisor_for_digits(digits: u64) -> u64 {
+    let sqrt_log10 = (digits as f64) / 2.0;
+    let max_log10 = (u64::MAX as f64).log10();
+    if sqrt_log10 >= max_log10 {
+        return u64::MAX;
+    }
+    10f64.powf(sqrt_log10).ceil().clamp(2.0, u64::MAX as f64) as u64
+}
+
+fn random_small_factor_probability(max_divisor: u64) -> f64 {
+    if max_divisor < 3 {
+        return 0.0;
+    }
+    const MERTENS_E_NEG_GAMMA: f64 = 0.561_459_483_566_885_1;
+    let ln_b = (max_divisor as f64).ln();
+    let no_small_factor = (MERTENS_E_NEG_GAMMA / ln_b).clamp(0.0, 1.0);
+    (1.0 - no_small_factor).clamp(0.0, 1.0)
+}
+
+fn format_duration(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "unknown".to_string();
+    }
+    let total = seconds.round() as u64;
+    let days = total / 86_400;
+    let hours = (total % 86_400) / 3600;
+    let minutes = (total % 3600) / 60;
+    let secs = total % 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m {secs}s")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m {secs}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {secs}s")
+    } else {
+        format!("{secs}s")
+    }
 }
 
 fn scan_factor_range<F>(
@@ -869,7 +1071,10 @@ mod tests {
     fn cli_parses_inline_number_source() {
         let cli = Cli::parse_from(["num-chrunchr", "--number", "3141592653589793", "analyze"]);
 
-        let source = cli.number_source().expect("number source should parse");
+        let source = cli
+            .number_source()
+            .expect("number source should parse")
+            .expect("source should exist");
         match source {
             NumberSource::Inline(text) => {
                 assert_eq!(text, "3141592653589793");
@@ -938,6 +1143,47 @@ mod tests {
             _ => panic!("expected write-decimal command"),
         }
         assert!(cli.binary);
+    }
+
+    #[test]
+    fn cli_parses_estimate_any_factor_digits_only() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "estimate-any-factor",
+            "--digits",
+            "1000000",
+            "--factors-per-sec",
+            "350000000",
+        ]);
+        assert!(cli.number_source().unwrap().is_none());
+        assert_eq!(cli.encoding(None).unwrap(), NumberEncoding::Decimal);
+        match cli.cmd {
+            Command::EstimateAnyFactor {
+                digits,
+                max_divisor,
+                factors_per_sec,
+                mode,
+            } => {
+                assert_eq!(digits, Some(1_000_000));
+                assert!(max_divisor.is_none());
+                assert_eq!(factors_per_sec, Some(350_000_000.0));
+                assert_eq!(mode, EstimateMode::Unknown);
+            }
+            _ => panic!("expected estimate-any-factor command"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_binary_estimate_without_input() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--binary",
+            "estimate-any-factor",
+            "--digits",
+            "1000",
+        ]);
+        let err = cli.encoding(None).unwrap_err();
+        assert!(err.to_string().contains("--binary requires --input"));
     }
 
     #[test]
@@ -1021,7 +1267,7 @@ mod tests {
             "7",
         ]);
         let source = cli.number_source().unwrap();
-        let err = cli.encoding(&source).unwrap_err();
+        let err = cli.encoding(source.as_ref()).unwrap_err();
         assert!(err.to_string().contains("--little-endian"));
     }
 
@@ -1037,7 +1283,7 @@ mod tests {
             "7",
         ]);
         let source = cli.number_source().unwrap();
-        let err = cli.encoding(&source).unwrap_err();
+        let err = cli.encoding(source.as_ref()).unwrap_err();
         assert!(err.to_string().contains("--binary requires --input"));
     }
 
@@ -1291,6 +1537,51 @@ mod tests {
         .unwrap();
         assert_eq!(count, 2);
         assert_eq!(seen, vec![2, 3]);
+    }
+
+    #[test]
+    fn estimate_helpers_produce_expected_values() {
+        assert_eq!(default_max_divisor_for_digits(2), 10);
+        assert!(random_small_factor_probability(10_000) > 0.9);
+        assert_eq!(format_duration(75.0), "1m 15s");
+    }
+
+    #[test]
+    fn estimate_any_factor_rejects_missing_source_and_digits() {
+        let err = run_estimate_any_factor(
+            None,
+            1024,
+            NumberEncoding::Decimal,
+            None,
+            Some(100),
+            Some(1_000_000.0),
+            EstimateMode::Unknown,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("requires --digits or an input source")
+        );
+    }
+
+    #[test]
+    fn estimate_any_factor_rejects_digits_with_input() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "12345").unwrap();
+        let err = run_estimate_any_factor(
+            Some(file.path()),
+            1024,
+            NumberEncoding::Decimal,
+            Some(10),
+            Some(100),
+            Some(1_000_000.0),
+            EstimateMode::Unknown,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("either --digits or --input/--number")
+        );
     }
 
     #[test]
