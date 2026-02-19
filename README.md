@@ -145,6 +145,9 @@ batch_mod.rs # GPU-assisted remainder scanning (planned)
 ### Commands
 
 - `analyze` — digit length + leading digits
+- `digits` — return decimal digit count of input
+- `log` — compute `log_base(N)` with optional integer-only output
+- `pow` — compute `N^exponent` and emit decimal
 - `mod` — compute `N mod p` streaming
 - `div` — divide by a small `u32` divisor (streaming), write quotient to a file
 - `write-decimal` — convert raw binary input bytes into decimal text output (`--binary`, optional `--little-endian`)
@@ -182,13 +185,29 @@ cargo run -- --input n.bin --binary --little-endian mod --p 97
 
 cargo run -- --input n.bin --binary --little-endian write-decimal --out n.txt
 
+    Digit count:
+
+cargo run -- --input n.txt digits
+
+    Logarithm:
+
+cargo run -- --input n.txt log --base 10
+
+cargo run -- --input n.txt log --base 2 --integer-part
+
+    Exponentiation:
+
+cargo run -- --number "12" pow --exponent 20
+
+cargo run -- --number "12" pow --exponent 20 --out power.txt
+
     Divide:
 
 cargo run -- --input n.txt div --d 3 --out q.txt
 
 This writes quotient digits to q.txt and prints remainder=....
 
-`div`, `analyze`, and `peel` currently support decimal input only; `--binary` is supported by `mod`, `write-decimal`, `estimate-any-factor`, and `range-factors`.
+`div`, `analyze`, and `peel` currently support decimal input only; `--binary` is supported by `digits`, `log`, `pow`, `mod`, `write-decimal`, `estimate-any-factor`, and `range-factors`.
 
     Any-factor estimate:
 

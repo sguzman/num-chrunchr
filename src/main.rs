@@ -9,7 +9,8 @@ use clap::{ArgGroup, Parser, Subcommand};
 use config::{Config, LoggingConfig};
 use gpu::batch_mod::{BatchModEngine, SymbolOrder};
 use num_bigint::BigUint;
-use repr::DecimalStream;
+use num_traits::ToPrimitive;
+use repr::{BigIntRam, DecimalStream};
 use source::NumberSource;
 use std::{
     fs,
@@ -68,6 +69,23 @@ enum Command {
     Analyze {
         #[arg(long)]
         leading: Option<usize>,
+    },
+    /// Return the decimal digit count of the input number
+    Digits,
+    /// Compute log_base(N), optionally only returning the integer part
+    Log {
+        #[arg(long)]
+        base: f64,
+        /// Return only floor(log_base(N))
+        #[arg(long, default_value_t = false)]
+        integer_part: bool,
+    },
+    /// Compute N^exponent and emit decimal output
+    Pow {
+        #[arg(long)]
+        exponent: u32,
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -217,6 +235,66 @@ fn main() -> Result<()> {
             let stream = DecimalStream::from_config(&prepared.path, &config.stream)
                 .with_context(|| format!("open input {}", prepared.path.display()))?;
             run_analyze(&stream, leading, &config.analysis)?;
+        }
+        Command::Digits => {
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
+            let prepared = source.prepare()?;
+            let digits = input_decimal_digits(&prepared.path, config.stream.buffer_size, encoding)?;
+            println!("{digits}");
+            info!(digits, encoding = ?encoding, "digit-count complete");
+        }
+        Command::Log { base, integer_part } => {
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
+            let prepared = source.prepare()?;
+            let value =
+                load_biguint_from_input(&prepared.path, config.stream.buffer_size, encoding)?;
+            let log_value = log_biguint_base(&value, base)?;
+            if integer_part {
+                let int_part = log_value.floor() as i128;
+                println!("{int_part}");
+                info!(
+                    base,
+                    integer_part = int_part,
+                    encoding = ?encoding,
+                    "log command complete"
+                );
+            } else {
+                println!("{log_value:.12}");
+                info!(base, log_value, encoding = ?encoding, "log command complete");
+            }
+        }
+        Command::Pow { exponent, out } => {
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
+            let prepared = source.prepare()?;
+            let value =
+                load_biguint_from_input(&prepared.path, config.stream.buffer_size, encoding)?;
+            let result = value.pow(exponent);
+            let decimal = result.to_str_radix(10);
+            if let Some(path) = out {
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("failed to create {}", parent.display()))?;
+                    }
+                }
+                fs::write(&path, decimal.as_bytes())
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                info!(
+                    exponent,
+                    output = %path.display(),
+                    digits = decimal.len(),
+                    "pow command complete"
+                );
+            } else {
+                println!("{decimal}");
+                info!(exponent, digits = decimal.len(), "pow command complete");
+            }
         }
         Command::WriteDecimal { out } => {
             let source = source
@@ -393,6 +471,65 @@ fn run_write_decimal_from_binary(
         "write-decimal complete"
     );
     Ok(())
+}
+
+fn load_biguint_from_input(
+    path: &Path,
+    buffer_size: usize,
+    encoding: NumberEncoding,
+) -> Result<BigUint> {
+    match encoding {
+        NumberEncoding::Decimal => {
+            let bigint = BigIntRam::from_decimal_stream(path, buffer_size)?;
+            Ok(bigint.as_biguint().clone())
+        }
+        NumberEncoding::BinaryBigEndian => {
+            let bytes = fs::read(path)
+                .with_context(|| format!("failed to read binary input {}", path.display()))?;
+            Ok(BigUint::from_bytes_be(&bytes))
+        }
+        NumberEncoding::BinaryLittleEndian => {
+            let bytes = fs::read(path)
+                .with_context(|| format!("failed to read binary input {}", path.display()))?;
+            Ok(BigUint::from_bytes_le(&bytes))
+        }
+    }
+}
+
+fn input_decimal_digits(path: &Path, buffer_size: usize, encoding: NumberEncoding) -> Result<u64> {
+    match encoding {
+        NumberEncoding::Decimal => {
+            let stream = DecimalStream::open(path, buffer_size)?;
+            Ok(stream.decimal_len()?)
+        }
+        NumberEncoding::BinaryBigEndian | NumberEncoding::BinaryLittleEndian => {
+            let value = load_biguint_from_input(path, buffer_size, encoding)?;
+            Ok(value.to_str_radix(10).len() as u64)
+        }
+    }
+}
+
+fn log_biguint_base(value: &BigUint, base: f64) -> Result<f64> {
+    if value == &BigUint::from(0u8) {
+        bail!("log undefined for zero");
+    }
+    if !base.is_finite() || base <= 0.0 || (base - 1.0).abs() < f64::EPSILON {
+        bail!("base must be finite, > 0, and not equal to 1");
+    }
+
+    let bit_len = value.bits();
+    let shift = bit_len.saturating_sub(53);
+    let top = if shift > 0 {
+        (value >> shift)
+            .to_u64()
+            .ok_or_else(|| anyhow::anyhow!("failed to normalize input"))? as f64
+    } else {
+        value
+            .to_u64()
+            .ok_or_else(|| anyhow::anyhow!("failed to normalize input"))? as f64
+    };
+    let ln_n = top.ln() + (shift as f64) * std::f64::consts::LN_2;
+    Ok(ln_n / base.ln())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -1146,6 +1283,47 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_digits_log_and_pow_commands() {
+        let digits_cli = Cli::parse_from(["num-chrunchr", "--number", "12345", "digits"]);
+        assert!(matches!(digits_cli.cmd, Command::Digits));
+
+        let log_cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "12345",
+            "log",
+            "--base",
+            "10",
+            "--integer-part",
+        ]);
+        match log_cli.cmd {
+            Command::Log { base, integer_part } => {
+                assert_eq!(base, 10.0);
+                assert!(integer_part);
+            }
+            _ => panic!("expected log command"),
+        }
+
+        let pow_cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "12345",
+            "pow",
+            "--exponent",
+            "3",
+            "--out",
+            "pow.txt",
+        ]);
+        match pow_cli.cmd {
+            Command::Pow { exponent, out } => {
+                assert_eq!(exponent, 3);
+                assert_eq!(out, Some(PathBuf::from("pow.txt")));
+            }
+            _ => panic!("expected pow command"),
+        }
+    }
+
+    #[test]
     fn cli_parses_estimate_any_factor_digits_only() {
         let cli = Cli::parse_from([
             "num-chrunchr",
@@ -1582,6 +1760,28 @@ mod tests {
             err.to_string()
                 .contains("either --digits or --input/--number")
         );
+    }
+
+    #[test]
+    fn digits_and_log_helpers_work_for_decimal_and_binary() {
+        let mut decimal_file = NamedTempFile::new().unwrap();
+        write!(decimal_file, "12345").unwrap();
+        assert_eq!(
+            input_decimal_digits(decimal_file.path(), 1024, NumberEncoding::Decimal).unwrap(),
+            5
+        );
+
+        let mut binary_file = NamedTempFile::new().unwrap();
+        binary_file.write_all(&[0x01, 0x00]).unwrap();
+        assert_eq!(
+            input_decimal_digits(binary_file.path(), 1024, NumberEncoding::BinaryBigEndian)
+                .unwrap(),
+            3
+        );
+
+        let value = BigUint::from(1000u64);
+        let log10 = log_biguint_base(&value, 10.0).unwrap();
+        assert!((log10 - 3.0).abs() < 1e-10);
     }
 
     #[test]
