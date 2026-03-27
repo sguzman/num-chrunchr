@@ -328,7 +328,7 @@ fn main() -> Result<()> {
             )?;
             let result = nearest_power_exponent(&base, &value)?;
             let delta_digits = biguint_decimal_digits(&result.delta);
-            let delta_percent = percent_delta_string(&value, &result.power);
+            let power_percent = percent_of_value_string(&value, &result.power);
             let power_over = result.power >= value;
             println!("{}", result.exponent);
             info!(
@@ -340,7 +340,7 @@ fn main() -> Result<()> {
                 delta_digits,
                 exponents_checked = result.exponents_checked,
                 power_over,
-                delta_percent = %delta_percent,
+                power_percent = %power_percent,
                 "near-power command complete"
             );
         }
@@ -683,15 +683,17 @@ fn biguint_decimal_digits(value: &BigUint) -> u64 {
     ((bits - 1) as f64 * std::f64::consts::LOG10_2).floor() as u64 + 1
 }
 
-fn percent_delta_string(value: &BigUint, power: &BigUint) -> String {
+fn percent_of_value_string(value: &BigUint, power: &BigUint) -> String {
     if value.is_zero() {
+        if power.is_zero() {
+            return "0.000000%".to_string();
+        }
         return "inf".to_string();
     }
 
-    let delta = abs_diff(value, power);
     let scale = BigUint::from(1_000_000u64);
     let factor = BigUint::from(100_000_000u64);
-    let scaled = (&delta * factor) / value;
+    let scaled = (power * &factor) / value;
     let integer = &scaled / &scale;
     let frac = &scaled % &scale;
     let frac_u64 = frac.to_u64().unwrap_or(0);
