@@ -1446,6 +1446,13 @@ fn floor_log_biguint(
 
     // Fast path: estimate k via logs, then adjust locally.
     let (approx_k, mut checked) = estimate_floor_log(base, value)?;
+    info!(
+        base_value = %base,
+        base_bits = base.bits(),
+        value_bits = value.bits(),
+        k_floor_estimate = approx_k,
+        "log estimate for floor exponent"
+    );
     let mut k = approx_k.min(max_k as u32);
 
     // Adjust downward if we overshot.
