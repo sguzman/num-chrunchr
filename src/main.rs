@@ -908,10 +908,10 @@ fn run_near_power_iterations(
         }
         exponents.push(result.exponent);
 
-        if result.delta.is_zero() {
+        remaining = result.delta;
+        if remaining.is_zero() {
             break;
         }
-        remaining = result.delta;
     }
 
     let iterations = exponents.len() as u32;
