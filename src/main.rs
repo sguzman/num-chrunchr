@@ -329,6 +329,7 @@ fn main() -> Result<()> {
             let result = nearest_power_exponent(&base, &value)?;
             let delta_digits = biguint_decimal_digits(&result.delta);
             let delta_percent = percent_delta_string(&value, &result.power);
+            let power_over = result.power >= value;
             println!("{}", result.exponent);
             info!(
                 base_bits = base.bits(),
@@ -338,6 +339,7 @@ fn main() -> Result<()> {
                 delta_bits = result.delta.bits(),
                 delta_digits,
                 exponents_checked = result.exponents_checked,
+                power_over,
                 delta_percent = %delta_percent,
                 "near-power command complete"
             );
