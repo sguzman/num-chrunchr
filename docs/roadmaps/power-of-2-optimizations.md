@@ -23,7 +23,7 @@
 
 ## Delta Computation
 - [x] Compute `delta = |N - power|` as today, but avoid extra clones where possible.
-- [ ] For `N` close to `power`, use early-exit compare to avoid full subtraction when possible.
+- [x] For `N` close to `power`, use early-exit compare to avoid full subtraction when possible.
 
 ## Iterative Near-Power (`--n-times`)
 - [x] Reuse fast path for each delta iteration when base is `2^m`.
@@ -43,8 +43,8 @@
 
 ## Performance Validation
 - [x] Add benchmark comparing general path vs fast path for base `2`, `4`, `8`, `16` on large binary inputs.
-- [ ] Validate that `exponents_checked` shrinks to constant for the fast path.
-- [ ] Record runtime and memory stats in `reports/` for large sample inputs.
+- [x] Validate that `exponents_checked` shrinks to constant for the fast path.
+- [x] Record runtime and memory stats in `reports/` for large sample inputs.
 
 ## Cleanup
 - [x] Document fast path in `README.md` (near-power section).

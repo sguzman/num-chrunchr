@@ -740,7 +740,7 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
             bail!("shift exceeds addressable size for power-of-two fast path");
         }
         let power_floor = BigUint::from(1u8) << (shift_floor as usize);
-        let delta_floor = abs_diff(value, &power_floor);
+        let (delta_floor, delta_floor_exact) = abs_diff_counted(value, &power_floor);
         let mut best = NearPowerResult {
             exponent: k_floor,
             power: power_floor,
@@ -753,7 +753,7 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
             shift_bits_used: shift_floor,
         };
 
-        if best.delta.is_zero() {
+        if delta_floor_exact {
             return Ok(best);
         }
 
@@ -764,7 +764,7 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
                 return Ok(best);
             }
             let power_hi = BigUint::from(1u8) << (shift_hi as usize);
-            let delta_hi = abs_diff(value, &power_hi);
+            let (delta_hi, delta_hi_exact) = abs_diff_counted(value, &power_hi);
             best.comparisons += 1;
             best.exponents_checked += 1;
             best.shift_bits_used = best.shift_bits_used.saturating_add(shift_hi);
@@ -787,6 +787,9 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
                 }
                 Ordering::Greater => {}
             }
+            if delta_hi_exact {
+                return Ok(best);
+            }
         }
 
         return Ok(best);
@@ -794,7 +797,7 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
 
     let (floor, checked) = floor_log_biguint(base, value)?;
     let power_floor = base.pow(floor);
-    let delta_floor = abs_diff(value, &power_floor);
+    let (delta_floor, delta_floor_exact) = abs_diff_counted(value, &power_floor);
     let mut best = NearPowerResult {
         exponent: floor,
         power: power_floor,
@@ -807,14 +810,14 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
         shift_bits_used: 0,
     };
 
-    if best.delta.is_zero() {
+    if delta_floor_exact {
         return Ok(best);
     }
 
     if floor < u32::MAX {
         let hi = floor + 1;
         let power_hi = base.pow(hi);
-        let delta_hi = abs_diff(value, &power_hi);
+        let (delta_hi, delta_hi_exact) = abs_diff_counted(value, &power_hi);
         best.exponents_checked += 1;
         best.comparisons += 1;
         match delta_hi.cmp(&best.delta) {
@@ -835,6 +838,9 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
                 // Keep lower exponent on ties.
             }
             Ordering::Greater => {}
+        }
+        if delta_hi_exact {
+            return Ok(best);
         }
     }
 
@@ -910,11 +916,11 @@ fn run_near_power_iterations(
     })
 }
 
-fn abs_diff(a: &BigUint, b: &BigUint) -> BigUint {
+fn abs_diff_counted(a: &BigUint, b: &BigUint) -> (BigUint, bool) {
     match a.cmp(b) {
-        Ordering::Greater => a - b,
-        Ordering::Equal => BigUint::from(0u8),
-        Ordering::Less => b - a,
+        Ordering::Greater => (a - b, false),
+        Ordering::Equal => (BigUint::from(0u8), true),
+        Ordering::Less => (b - a, false),
     }
 }
 
