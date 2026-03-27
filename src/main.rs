@@ -353,6 +353,7 @@ fn main() -> Result<()> {
             println!("{exponent_list}"); // keep stdout simple but informative
             let coverage_percent = coverage_percent_string(&value, &iter_result.final_delta);
             let percent_delta = percent_delta_string(&value, &iter_result.final_delta);
+            let exact_coverage = iter_result.final_delta.is_zero();
             info!(
                 base_bits = base.bits(),
                 value_bits = value.bits(),
@@ -370,6 +371,7 @@ fn main() -> Result<()> {
                 final_delta_digits = biguint_decimal_digits(&iter_result.final_delta),
                 coverage_percent = %coverage_percent,
                 percent_delta = %percent_delta,
+                exact_coverage,
                 "near-power aggregate complete"
             );
         }
