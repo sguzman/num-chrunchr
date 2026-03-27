@@ -107,6 +107,9 @@ enum Command {
         /// Interpret raw binary base bytes as little-endian (default big-endian)
         #[arg(long, default_value_t = false)]
         base_little_endian: bool,
+        /// Repeat near-power on the remaining delta N times (stop early if exact)
+        #[arg(long, default_value_t = 1)]
+        n_times: u32,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -322,6 +325,7 @@ fn main() -> Result<()> {
             base_number,
             base_binary,
             base_little_endian,
+            n_times,
         } => {
             let source = source
                 .as_ref()
@@ -336,24 +340,29 @@ fn main() -> Result<()> {
                 base_binary,
                 base_little_endian,
             )?;
-            let result = nearest_power_exponent(&base, &value)?;
-            let delta_digits = biguint_decimal_digits(&result.delta);
-            let power_percent = percent_of_value_string(&value, &result.power);
-            let power_over = result.power >= value;
-            println!("{}", result.exponent);
+            if n_times == 0 {
+                bail!("--n-times must be >= 1");
+            }
+            let iter_result = run_near_power_iterations(&base, &value, n_times)?;
+            let exponent_list = iter_result
+                .exponents
+                .iter()
+                .map(|exp| exp.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("{exponent_list}"); // keep stdout simple but informative
             info!(
                 base_bits = base.bits(),
                 value_bits = value.bits(),
-                exponent = result.exponent,
-                power_bits = result.power.bits(),
-                delta_bits = result.delta.bits(),
-                delta_digits,
-                exponents_checked = result.exponents_checked,
                 base_binary,
                 base_little_endian,
-                power_over,
-                power_percent = %power_percent,
-                "near-power command complete"
+                iterations = iter_result.iterations,
+                total_exponents_checked = iter_result.total_exponents_checked,
+                total_power_bits = iter_result.total_power.bits(),
+                total_delta_bits = iter_result.total_delta.bits(),
+                total_delta_digits = biguint_decimal_digits(&iter_result.total_delta),
+                coverage_percent = %percent_of_value_string(&value, &iter_result.total_power),
+                "near-power aggregate complete"
             );
         }
         Command::WriteDecimal { out } => {
@@ -598,6 +607,14 @@ struct NearPowerResult {
     exponents_checked: u64,
 }
 
+struct NearPowerIterations {
+    exponents: Vec<u32>,
+    iterations: u32,
+    total_power: BigUint,
+    total_delta: BigUint,
+    total_exponents_checked: u64,
+}
+
 fn load_base_biguint(
     base_input: Option<&PathBuf>,
     base_number: Option<&str>,
@@ -693,6 +710,57 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
     }
 
     Ok(best)
+}
+
+fn run_near_power_iterations(
+    base: &BigUint,
+    value: &BigUint,
+    n_times: u32,
+) -> Result<NearPowerIterations> {
+    let mut remaining = value.clone();
+    let mut total_power = BigUint::from(0u8);
+    let mut total_delta = BigUint::from(0u8);
+    let mut total_exponents_checked = 0u64;
+    let mut exponents = Vec::new();
+
+    for idx in 1..=n_times {
+        let result = nearest_power_exponent(base, &remaining)?;
+        let delta_digits = biguint_decimal_digits(&result.delta);
+        let power_percent = percent_of_value_string(&remaining, &result.power);
+        let power_over = result.power >= remaining;
+        info!(
+            iteration = idx,
+            base_bits = base.bits(),
+            value_bits = remaining.bits(),
+            exponent = result.exponent,
+            power_bits = result.power.bits(),
+            delta_bits = result.delta.bits(),
+            delta_digits,
+            exponents_checked = result.exponents_checked,
+            power_over,
+            power_percent = %power_percent,
+            "near-power iteration complete"
+        );
+
+        total_power += &result.power;
+        total_delta += &result.delta;
+        total_exponents_checked += result.exponents_checked;
+        exponents.push(result.exponent);
+
+        if result.delta.is_zero() {
+            break;
+        }
+        remaining = result.delta;
+    }
+
+    let iterations = exponents.len() as u32;
+    Ok(NearPowerIterations {
+        exponents,
+        iterations,
+        total_power,
+        total_delta,
+        total_exponents_checked,
+    })
 }
 
 fn abs_diff(a: &BigUint, b: &BigUint) -> BigUint {
@@ -1631,6 +1699,8 @@ mod tests {
             "near-power",
             "--base-number",
             "10",
+            "--n-times",
+            "3",
         ]);
         match cli.cmd {
             Command::NearPower {
@@ -1638,11 +1708,13 @@ mod tests {
                 base_number,
                 base_binary,
                 base_little_endian,
+                n_times,
             } => {
                 assert!(base_input.is_none());
                 assert_eq!(base_number, Some("10".to_string()));
                 assert!(!base_binary);
                 assert!(!base_little_endian);
+                assert_eq!(n_times, 3);
             }
             _ => panic!("expected near-power command"),
         }
@@ -1666,11 +1738,13 @@ mod tests {
                 base_number,
                 base_binary,
                 base_little_endian,
+                n_times,
             } => {
                 assert_eq!(base_input, Some(PathBuf::from("base.bin")));
                 assert!(base_number.is_none());
                 assert!(base_binary);
                 assert!(base_little_endian);
+                assert_eq!(n_times, 1);
             }
             _ => panic!("expected near-power command"),
         }
@@ -1690,6 +1764,17 @@ mod tests {
         let value = BigUint::from(900u16);
         let result = nearest_power_exponent(&base, &value).unwrap();
         assert_eq!(result.exponent, 3);
+    }
+
+    #[test]
+    fn near_power_iterations_stop_on_exact_match() {
+        let base = BigUint::from(2u8);
+        let value = BigUint::from(6u8);
+        let result = run_near_power_iterations(&base, &value, 5).unwrap();
+        assert_eq!(result.exponents, vec![2, 1]);
+        assert_eq!(result.iterations, 2);
+        assert_eq!(result.total_power, BigUint::from(6u8));
+        assert_eq!(result.total_delta, BigUint::from(2u8));
     }
 
     #[test]
@@ -1851,6 +1936,7 @@ mod tests {
                 base_number,
                 base_binary,
                 base_little_endian,
+                n_times: _,
             } => load_base_biguint(
                 base_input.as_ref(),
                 base_number.as_deref(),
@@ -1881,6 +1967,7 @@ mod tests {
                 base_number,
                 base_binary,
                 base_little_endian,
+                n_times: _,
             } => load_base_biguint(
                 base_input.as_ref(),
                 base_number.as_deref(),
