@@ -22,7 +22,7 @@
 - [x] Add unit tests verifying equivalence to `base.pow(k)` for small cases.
 
 ## Delta Computation
-- [ ] Compute `delta = |N - power|` as today, but avoid extra clones where possible.
+- [x] Compute `delta = |N - power|` as today, but avoid extra clones where possible.
 - [ ] For `N` close to `power`, use early-exit compare to avoid full subtraction when possible.
 
 ## Iterative Near-Power (`--n-times`)
@@ -36,13 +36,13 @@
 - [x] Verify existing `power_percent`, `percent_delta`, `coverage_percent` remain consistent.
 
 ## Correctness Edge Cases
-- [ ] Handle `N = 0` (expect exponent 0, power 1, delta 1).
-- [ ] Handle `base = 2` (`m = 1`) without special casing.
-- [ ] Handle extremely large `m*k` where shift length exceeds `u32` but fits `usize`.
-- [ ] Ensure behavior for `base` not power-of-2 stays on current general path.
+- [x] Handle `N = 0` (expect exponent 0, power 1, delta 1).
+- [x] Handle `base = 2` (`m = 1`) without special casing.
+- [x] Handle extremely large `m*k` where shift length exceeds `u32` but fits `usize`.
+- [x] Ensure behavior for `base` not power-of-2 stays on current general path.
 
 ## Performance Validation
-- [ ] Add benchmark comparing general path vs fast path for base `2`, `4`, `8`, `16` on large binary inputs.
+- [x] Add benchmark comparing general path vs fast path for base `2`, `4`, `8`, `16` on large binary inputs.
 - [ ] Validate that `exponents_checked` shrinks to constant for the fast path.
 - [ ] Record runtime and memory stats in `reports/` for large sample inputs.
 

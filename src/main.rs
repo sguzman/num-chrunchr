@@ -753,6 +753,10 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
             shift_bits_used: shift_floor,
         };
 
+        if best.delta.is_zero() {
+            return Ok(best);
+        }
+
         if k_floor < u32::MAX {
             let k_hi = k_floor + 1;
             let shift_hi = m_u64.saturating_mul(k_hi as u64);
@@ -764,18 +768,24 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
             best.comparisons += 1;
             best.exponents_checked += 1;
             best.shift_bits_used = best.shift_bits_used.saturating_add(shift_hi);
-            if delta_hi < best.delta {
-                best = NearPowerResult {
-                    exponent: k_hi,
-                    power: power_hi,
-                    delta: delta_hi,
-                    exponents_checked: best.exponents_checked,
-                    comparisons: best.comparisons,
-                    fast_path: true,
-                    power_of_two_m: Some(m),
-                    k_floor: Some(k_floor),
-                    shift_bits_used: best.shift_bits_used,
-                };
+            match delta_hi.cmp(&best.delta) {
+                Ordering::Less => {
+                    best = NearPowerResult {
+                        exponent: k_hi,
+                        power: power_hi,
+                        delta: delta_hi,
+                        exponents_checked: best.exponents_checked,
+                        comparisons: best.comparisons,
+                        fast_path: true,
+                        power_of_two_m: Some(m),
+                        k_floor: Some(k_floor),
+                        shift_bits_used: best.shift_bits_used,
+                    };
+                }
+                Ordering::Equal => {
+                    // Keep lower exponent on ties.
+                }
+                Ordering::Greater => {}
             }
         }
 
@@ -797,28 +807,34 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
         shift_bits_used: 0,
     };
 
+    if best.delta.is_zero() {
+        return Ok(best);
+    }
+
     if floor < u32::MAX {
         let hi = floor + 1;
         let power_hi = base.pow(hi);
         let delta_hi = abs_diff(value, &power_hi);
-        let better = match delta_hi.cmp(&best.delta) {
-            Ordering::Less => true,
-            Ordering::Equal => false,
-            Ordering::Greater => false,
-        };
         best.exponents_checked += 1;
-        if better {
-            best = NearPowerResult {
-                exponent: hi,
-                power: power_hi,
-                delta: delta_hi,
-                exponents_checked: best.exponents_checked,
-                comparisons: best.comparisons,
-                fast_path: false,
-                power_of_two_m: None,
-                k_floor: Some(floor),
-                shift_bits_used: 0,
-            };
+        best.comparisons += 1;
+        match delta_hi.cmp(&best.delta) {
+            Ordering::Less => {
+                best = NearPowerResult {
+                    exponent: hi,
+                    power: power_hi,
+                    delta: delta_hi,
+                    exponents_checked: best.exponents_checked,
+                    comparisons: best.comparisons,
+                    fast_path: false,
+                    power_of_two_m: None,
+                    k_floor: Some(floor),
+                    shift_bits_used: 0,
+                };
+            }
+            Ordering::Equal => {
+                // Keep lower exponent on ties.
+            }
+            Ordering::Greater => {}
         }
     }
 
@@ -895,10 +911,10 @@ fn run_near_power_iterations(
 }
 
 fn abs_diff(a: &BigUint, b: &BigUint) -> BigUint {
-    if a >= b {
-        a - b
-    } else {
-        b - a
+    match a.cmp(b) {
+        Ordering::Greater => a - b,
+        Ordering::Equal => BigUint::from(0u8),
+        Ordering::Less => b - a,
     }
 }
 
@@ -1963,6 +1979,24 @@ mod tests {
         assert_eq!(result.exponents, vec![5, 3, 2]);
         assert_eq!(result.iterations, 3);
         assert_eq!(result.final_delta, BigUint::from(0u8));
+    }
+
+    #[test]
+    fn nearest_power_zero_returns_exponent_zero() {
+        let base = BigUint::from(2u8);
+        let value = BigUint::from(0u8);
+        let result = nearest_power_exponent(&base, &value).unwrap();
+        assert_eq!(result.exponent, 0);
+        assert_eq!(result.delta, BigUint::from(1u8));
+    }
+
+    #[test]
+    fn near_power_iterations_zero_value_stops_immediately() {
+        let base = BigUint::from(4u8);
+        let value = BigUint::from(0u8);
+        let result = run_near_power_iterations(&base, &value, 5).unwrap();
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.final_delta, BigUint::from(1u8));
     }
 
     #[test]
