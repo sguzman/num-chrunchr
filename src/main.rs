@@ -422,6 +422,7 @@ fn main() -> Result<()> {
             info!(
                 base_bits = ?base_bits,
                 base_mode,
+                base_sequence = ?iter_result.base_sequence,
                 value_bits = value.bits(),
                 base_binary,
                 base_little_endian,
@@ -701,6 +702,7 @@ struct NearPowerIterations {
     total_shift_bits: u64,
     final_delta: BigUint,
     base_bits: u64,
+    base_sequence: Option<Vec<u64>>,
 }
 
 struct CompressionResult {
@@ -993,6 +995,7 @@ fn run_near_power_iterations(
         let power_over = result.power >= remaining;
         info!(
             iteration = idx,
+            base_value = %base,
             base_bits = base.bits(),
             value_bits = remaining.bits(),
             fast_path = result.fast_path,
@@ -1040,6 +1043,7 @@ fn run_near_power_iterations(
         total_shift_bits,
         final_delta: remaining,
         base_bits,
+        base_sequence: None,
     })
 }
 
@@ -1114,6 +1118,7 @@ fn run_near_power_iterations_with_bases(
         total_shift_bits,
         final_delta: remaining,
         base_bits: 0,
+        base_sequence: Some(bases.iter().map(|b| b.to_u64().unwrap_or(0)).collect()),
     })
 }
 
