@@ -940,44 +940,44 @@ fn biguint_decimal_digits(value: &BigUint) -> u64 {
 fn percent_of_value_string(value: &BigUint, power: &BigUint) -> String {
     if value.is_zero() {
         if power.is_zero() {
-            return "0.000000%".to_string();
+            return "0.00%".to_string();
         }
         return "inf".to_string();
     }
 
-    let scale = BigUint::from(1_000_000u64);
-    let factor = BigUint::from(100_000_000u64);
+    let scale = BigUint::from(100u64);
+    let factor = BigUint::from(10_000u64);
     let scaled = (power * &factor) / value;
     let integer = &scaled / &scale;
     let frac = &scaled % &scale;
     let frac_u64 = frac.to_u64().unwrap_or(0);
-    format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
+    format!("{}.{:02}%", integer.to_str_radix(10), frac_u64)
 }
 
 fn percent_delta_string(value: &BigUint, delta: &BigUint) -> String {
     if value.is_zero() {
         if delta.is_zero() {
-            return "0.000000%".to_string();
+            return "0.00%".to_string();
         }
         return "inf".to_string();
     }
 
-    let scale = BigUint::from(1_000_000u64);
-    let factor = BigUint::from(100_000_000u64);
+    let scale = BigUint::from(100u64);
+    let factor = BigUint::from(10_000u64);
     let scaled = (delta * &factor) / value;
     let integer = &scaled / &scale;
     let frac = &scaled % &scale;
     let frac_u64 = frac.to_u64().unwrap_or(0);
-    format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
+    format!("{}.{:02}%", integer.to_str_radix(10), frac_u64)
 }
 
 fn coverage_percent_string(value: &BigUint, remaining: &BigUint) -> String {
     if value.is_zero() {
-        return "0.000000%".to_string();
+        return "0.00%".to_string();
     }
     let capped = if remaining > value { value.clone() } else { remaining.clone() };
-    let scale = BigUint::from(1_000_000u64);
-    let factor = BigUint::from(100_000_000u64);
+    let scale = BigUint::from(100u64);
+    let factor = BigUint::from(10_000u64);
     let scaled = (&capped * &factor) / value;
     let coverage_scaled = if scaled > factor {
         BigUint::from(0u8)
@@ -987,7 +987,7 @@ fn coverage_percent_string(value: &BigUint, remaining: &BigUint) -> String {
     let integer = &coverage_scaled / &scale;
     let frac = &coverage_scaled % &scale;
     let frac_u64 = frac.to_u64().unwrap_or(0);
-    format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
+    format!("{}.{:02}%", integer.to_str_radix(10), frac_u64)
 }
 
 fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
