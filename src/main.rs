@@ -352,6 +352,7 @@ fn main() -> Result<()> {
                 .join(",");
             println!("{exponent_list}"); // keep stdout simple but informative
             let coverage_percent = coverage_percent_string(&value, &iter_result.final_delta);
+            let percent_delta = percent_delta_string(&value, &iter_result.final_delta);
             info!(
                 base_bits = base.bits(),
                 value_bits = value.bits(),
@@ -365,6 +366,7 @@ fn main() -> Result<()> {
                 final_delta_bits = iter_result.final_delta.bits(),
                 final_delta_digits = biguint_decimal_digits(&iter_result.final_delta),
                 coverage_percent = %coverage_percent,
+                percent_delta = %percent_delta,
                 "near-power aggregate complete"
             );
         }
@@ -731,6 +733,7 @@ fn run_near_power_iterations(
         let result = nearest_power_exponent(base, &remaining)?;
         let delta_digits = biguint_decimal_digits(&result.delta);
         let power_percent = percent_of_value_string(&remaining, &result.power);
+        let percent_delta = percent_delta_string(&remaining, &result.delta);
         let power_over = result.power >= remaining;
         info!(
             iteration = idx,
@@ -742,6 +745,7 @@ fn run_near_power_iterations(
             delta_digits,
             exponents_checked = result.exponents_checked,
             power_over,
+            percent_delta = %percent_delta,
             power_percent = %power_percent,
             "near-power iteration complete"
         );
@@ -798,6 +802,23 @@ fn percent_of_value_string(value: &BigUint, power: &BigUint) -> String {
     let scale = BigUint::from(1_000_000u64);
     let factor = BigUint::from(100_000_000u64);
     let scaled = (power * &factor) / value;
+    let integer = &scaled / &scale;
+    let frac = &scaled % &scale;
+    let frac_u64 = frac.to_u64().unwrap_or(0);
+    format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
+}
+
+fn percent_delta_string(value: &BigUint, delta: &BigUint) -> String {
+    if value.is_zero() {
+        if delta.is_zero() {
+            return "0.000000%".to_string();
+        }
+        return "inf".to_string();
+    }
+
+    let scale = BigUint::from(1_000_000u64);
+    let factor = BigUint::from(100_000_000u64);
+    let scaled = (delta * &factor) / value;
     let integer = &scaled / &scale;
     let frac = &scaled % &scale;
     let frac_u64 = frac.to_u64().unwrap_or(0);
