@@ -9,10 +9,11 @@ use clap::{ArgGroup, Parser, Subcommand};
 use config::{Config, LoggingConfig};
 use gpu::batch_mod::{BatchModEngine, SymbolOrder};
 use num_bigint::BigUint;
-use num_traits::ToPrimitive;
+use num_traits::{ToPrimitive, Zero};
 use repr::{BigIntRam, DecimalStream};
 use source::NumberSource;
 use std::{
+    cmp::Ordering,
     fs,
     fs::File,
     io::{BufReader, Read, Write},
@@ -86,6 +87,20 @@ enum Command {
         exponent: u32,
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Find the exponent k where base^k is closest to N
+    #[command(group(
+        ArgGroup::new("base_source")
+            .args(["base_input", "base_number"])
+            .required(true)
+    ))]
+    NearPower {
+        /// Decimal file containing digits of the base
+        #[arg(long)]
+        base_input: Option<PathBuf>,
+        /// Inline decimal string for the base
+        #[arg(long)]
+        base_number: Option<String>,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -295,6 +310,32 @@ fn main() -> Result<()> {
                 println!("{decimal}");
                 info!(exponent, digits = decimal.len(), "pow command complete");
             }
+        }
+        Command::NearPower {
+            base_input,
+            base_number,
+        } => {
+            let source = source
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
+            let prepared = source.prepare()?;
+            let value =
+                load_biguint_from_input(&prepared.path, config.stream.buffer_size, encoding)?;
+            let base = load_base_biguint(
+                base_input.as_ref(),
+                base_number.as_deref(),
+                config.stream.buffer_size,
+            )?;
+            let result = nearest_power_exponent(&base, &value)?;
+            println!("{}", result.exponent);
+            info!(
+                base_bits = base.bits(),
+                value_bits = value.bits(),
+                exponent = result.exponent,
+                power_bits = result.power.bits(),
+                delta_bits = result.delta.bits(),
+                "near-power command complete"
+            );
         }
         Command::WriteDecimal { out } => {
             let source = source
@@ -529,6 +570,157 @@ fn log_biguint_base(value: &BigUint, base: f64) -> Result<f64> {
     };
     let ln_n = top.ln() + (shift as f64) * std::f64::consts::LN_2;
     Ok(ln_n / base.ln())
+}
+
+struct NearPowerResult {
+    exponent: u32,
+    power: BigUint,
+    delta: BigUint,
+}
+
+fn load_base_biguint(
+    base_input: Option<&PathBuf>,
+    base_number: Option<&str>,
+    buffer_size: usize,
+) -> Result<BigUint> {
+    match (base_input, base_number) {
+        (Some(path), None) => {
+            load_biguint_from_input(path, buffer_size, NumberEncoding::Decimal)
+                .with_context(|| format!("failed to load base from {}", path.display()))
+        }
+        (None, Some(text)) => parse_decimal_biguint(text),
+        (Some(_), Some(_)) => bail!("use either --base-input or --base-number"),
+        (None, None) => bail!("provide --base-input or --base-number"),
+    }
+}
+
+fn parse_decimal_biguint(text: &str) -> Result<BigUint> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        bail!("base number cannot be empty");
+    }
+    if !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        bail!("base number must be decimal digits only");
+    }
+    BigUint::parse_bytes(trimmed.as_bytes(), 10)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse base number"))
+}
+
+fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerResult> {
+    let two = BigUint::from(2u8);
+    if base < &two {
+        bail!("base must be >= 2");
+    }
+
+    if value.is_zero() {
+        let power = BigUint::from(1u8);
+        let delta = &power - value;
+        return Ok(NearPowerResult {
+            exponent: 0,
+            power,
+            delta,
+        });
+    }
+
+    let floor = floor_log_biguint(base, value)?;
+    let power_floor = base.pow(floor);
+    let delta_floor = abs_diff(value, &power_floor);
+    let mut best = NearPowerResult {
+        exponent: floor,
+        power: power_floor,
+        delta: delta_floor,
+    };
+
+    if floor < u32::MAX {
+        let hi = floor + 1;
+        let power_hi = base.pow(hi);
+        let delta_hi = abs_diff(value, &power_hi);
+        let better = match delta_hi.cmp(&best.delta) {
+            Ordering::Less => true,
+            Ordering::Equal => false,
+            Ordering::Greater => false,
+        };
+        if better {
+            best = NearPowerResult {
+                exponent: hi,
+                power: power_hi,
+                delta: delta_hi,
+            };
+        }
+    }
+
+    Ok(best)
+}
+
+fn abs_diff(a: &BigUint, b: &BigUint) -> BigUint {
+    if a >= b {
+        a - b
+    } else {
+        b - a
+    }
+}
+
+fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<u32> {
+    if value.is_zero() {
+        return Ok(0);
+    }
+    if base <= &BigUint::from(1u8) {
+        bail!("base must be >= 2");
+    }
+
+    let value_bits = value.bits();
+    let base_bits = base.bits();
+    if base_bits <= 1 {
+        return Ok(0);
+    }
+
+    let max_k = if value_bits <= 1 {
+        0u64
+    } else {
+        (value_bits - 1) / (base_bits - 1)
+    };
+    if max_k > u32::MAX as u64 {
+        bail!("exponent exceeds u32::MAX; base too small for this input");
+    }
+
+    let mut lo = 0u32;
+    let mut hi = max_k as u32;
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        match pow_cmp(base, mid, value) {
+            Ordering::Greater => {
+                hi = mid.saturating_sub(1);
+            }
+            Ordering::Equal | Ordering::Less => {
+                lo = mid;
+            }
+        }
+    }
+    Ok(lo)
+}
+
+fn pow_cmp(base: &BigUint, exp: u32, target: &BigUint) -> Ordering {
+    if exp == 0 {
+        return BigUint::from(1u8).cmp(target);
+    }
+
+    let mut result = BigUint::from(1u8);
+    let mut base_pow = base.clone();
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result *= &base_pow;
+            if result > *target {
+                return Ordering::Greater;
+            }
+        }
+        e >>= 1;
+        if e == 0 {
+            break;
+        }
+        base_pow = &base_pow * &base_pow;
+    }
+    result.cmp(target)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -1354,6 +1546,44 @@ mod tests {
             }
             _ => panic!("expected pow command"),
         }
+    }
+
+    #[test]
+    fn cli_parses_near_power_command() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "12345",
+            "near-power",
+            "--base-number",
+            "10",
+        ]);
+        match cli.cmd {
+            Command::NearPower {
+                base_input,
+                base_number,
+            } => {
+                assert!(base_input.is_none());
+                assert_eq!(base_number, Some("10".to_string()));
+            }
+            _ => panic!("expected near-power command"),
+        }
+    }
+
+    #[test]
+    fn nearest_power_prefers_lower_on_tie() {
+        let base = BigUint::from(2u8);
+        let value = BigUint::from(6u8);
+        let result = nearest_power_exponent(&base, &value).unwrap();
+        assert_eq!(result.exponent, 2);
+    }
+
+    #[test]
+    fn nearest_power_selects_closer_exponent() {
+        let base = BigUint::from(10u8);
+        let value = BigUint::from(900u16);
+        let result = nearest_power_exponent(&base, &value).unwrap();
+        assert_eq!(result.exponent, 3);
     }
 
     #[test]
