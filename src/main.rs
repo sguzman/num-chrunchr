@@ -110,6 +110,15 @@ enum Command {
         /// Repeat near-power on the remaining delta N times (stop early if exact)
         #[arg(long, default_value_t = 1)]
         n_times: u32,
+        /// Compress the exponent sequence with base+delta representation
+        #[arg(long, default_value_t = false, conflicts_with = "compress_seq_b")]
+        compress_seq_a: bool,
+        /// Compress the exponent sequence with delta sequence representation
+        #[arg(long, default_value_t = false, conflicts_with = "compress_seq_a")]
+        compress_seq_b: bool,
+        /// Compression scheme to optimize deltas
+        #[arg(long, value_enum, default_value_t = CompressionScheme::MinTotalAbs)]
+        compress_scheme: CompressionScheme,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -326,6 +335,9 @@ fn main() -> Result<()> {
             base_binary,
             base_little_endian,
             n_times,
+            compress_seq_a,
+            compress_seq_b,
+            compress_scheme,
         } => {
             let source = source
                 .as_ref()
@@ -351,6 +363,33 @@ fn main() -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(",");
             println!("{exponent_list}"); // keep stdout simple but informative
+            if compress_seq_a || compress_seq_b {
+                let compression = if compress_seq_a {
+                    compress_sequence_a(&iter_result.exponents, compress_scheme)
+                } else {
+                    compress_sequence_b(&iter_result.exponents, compress_scheme)
+                };
+                let mode_label = if compress_seq_a { "seqA" } else { "seqB" };
+                let delta_list = format_i128_list(&compression.deltas);
+                println!(
+                    "compress_mode={mode_label} scheme={:?} base={} deltas=[{}] max_abs_delta={} total_abs_delta={} total_digit_count={}",
+                    compression.scheme,
+                    compression.base,
+                    delta_list,
+                    compression.max_abs_delta,
+                    compression.total_abs_delta,
+                    compression.total_digit_count
+                );
+                info!(
+                    compress_mode = mode_label,
+                    compress_scheme = ?compression.scheme,
+                    compress_base = compression.base,
+                    compress_max_abs_delta = compression.max_abs_delta,
+                    compress_total_abs_delta = compression.total_abs_delta,
+                    compress_total_digit_count = compression.total_digit_count,
+                    "near-power compression complete"
+                );
+            }
             let coverage_percent = coverage_percent_string(&value, &iter_result.final_delta);
             let percent_delta = percent_delta_string(&value, &iter_result.final_delta);
             let exact_coverage = iter_result.final_delta.is_zero();
@@ -638,6 +677,15 @@ struct NearPowerIterations {
     fast_path_used_count: u64,
     total_shift_bits: u64,
     final_delta: BigUint,
+}
+
+struct CompressionResult {
+    scheme: CompressionScheme,
+    base: i128,
+    deltas: Vec<i128>,
+    max_abs_delta: i128,
+    total_abs_delta: i128,
+    total_digit_count: u64,
 }
 
 fn load_base_biguint(
@@ -928,6 +976,191 @@ fn run_near_power_iterations(
     })
 }
 
+fn compress_sequence_a(exponents: &[u32], scheme: CompressionScheme) -> CompressionResult {
+    let exps: Vec<i128> = exponents.iter().map(|&e| e as i128).collect();
+    let base = choose_base_for_scheme(&exps, scheme);
+    let deltas: Vec<i128> = exps.iter().map(|&e| e - base).collect();
+    compression_metrics(scheme, base, deltas)
+}
+
+fn compress_sequence_b(exponents: &[u32], scheme: CompressionScheme) -> CompressionResult {
+    let exps: Vec<i128> = exponents.iter().map(|&e| e as i128).collect();
+    let base = exps.first().copied().unwrap_or(0);
+    let mut deltas = Vec::new();
+    for window in exps.windows(2) {
+        let delta = window[1] - window[0];
+        deltas.push(delta);
+    }
+    compression_metrics(scheme, base, deltas)
+}
+
+fn choose_base_for_scheme(exps: &[i128], scheme: CompressionScheme) -> i128 {
+    if exps.is_empty() {
+        return 0;
+    }
+    match scheme {
+        CompressionScheme::MinTotalAbs => median_i128(exps),
+        CompressionScheme::MinMaxAbs => midrange_i128(exps),
+        CompressionScheme::MinDigitCount
+        | CompressionScheme::MinBitCount
+        | CompressionScheme::MinVarintSize => best_base_by_cost(exps, scheme),
+    }
+}
+
+fn compression_metrics(
+    scheme: CompressionScheme,
+    base: i128,
+    deltas: Vec<i128>,
+) -> CompressionResult {
+    let mut max_abs = 0i128;
+    let mut total_abs = 0i128;
+    for &d in &deltas {
+        let abs = d.abs();
+        if abs > max_abs {
+            max_abs = abs;
+        }
+        total_abs = total_abs.saturating_add(abs);
+    }
+    let total_digit_count = total_digit_count_for_scheme(scheme, base, &deltas);
+    CompressionResult {
+        scheme,
+        base,
+        deltas,
+        max_abs_delta: max_abs,
+        total_abs_delta: total_abs,
+        total_digit_count,
+    }
+}
+
+fn total_digit_count_for_scheme(
+    scheme: CompressionScheme,
+    base: i128,
+    deltas: &[i128],
+) -> u64 {
+    match scheme {
+        CompressionScheme::MinBitCount => {
+            let mut total = bit_len_i128(base) as u64;
+            for &d in deltas {
+                total = total.saturating_add(bit_len_i128(d) as u64);
+            }
+            total
+        }
+        CompressionScheme::MinVarintSize => {
+            let mut total = varint_len_i128(base) as u64;
+            for &d in deltas {
+                total = total.saturating_add(varint_len_i128(d) as u64);
+            }
+            total
+        }
+        _ => {
+            let mut total = digits_i128(base) as u64;
+            for &d in deltas {
+                total = total.saturating_add(digits_i128(d) as u64);
+            }
+            total
+        }
+    }
+}
+
+fn best_base_by_cost(exps: &[i128], scheme: CompressionScheme) -> i128 {
+    let mut candidates: Vec<i128> = Vec::new();
+    let min = *exps.iter().min().unwrap_or(&0);
+    let max = *exps.iter().max().unwrap_or(&0);
+    candidates.push(min);
+    candidates.push(max);
+    candidates.push(midrange_i128(exps));
+    candidates.push(median_i128(exps));
+    candidates.push(0);
+    for &e in exps {
+        candidates.push(e);
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let mut best = candidates[0];
+    let mut best_cost = cost_for_scheme(exps, best, scheme);
+    for &cand in candidates.iter().skip(1) {
+        let cost = cost_for_scheme(exps, cand, scheme);
+        if cost < best_cost || (cost == best_cost && cand < best) {
+            best = cand;
+            best_cost = cost;
+        }
+    }
+    best
+}
+
+fn cost_for_scheme(exps: &[i128], base: i128, scheme: CompressionScheme) -> u64 {
+    match scheme {
+        CompressionScheme::MinDigitCount => {
+            let mut total = digits_i128(base) as u64;
+            for &e in exps {
+                total = total.saturating_add(digits_i128(e - base) as u64);
+            }
+            total
+        }
+        CompressionScheme::MinBitCount => {
+            let mut total = bit_len_i128(base) as u64;
+            for &e in exps {
+                total = total.saturating_add(bit_len_i128(e - base) as u64);
+            }
+            total
+        }
+        CompressionScheme::MinVarintSize => {
+            let mut total = varint_len_i128(base) as u64;
+            for &e in exps {
+                total = total.saturating_add(varint_len_i128(e - base) as u64);
+            }
+            total
+        }
+        _ => 0,
+    }
+}
+
+fn median_i128(values: &[i128]) -> i128 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let mid = sorted.len() / 2;
+    sorted[mid]
+}
+
+fn midrange_i128(values: &[i128]) -> i128 {
+    let min = *values.iter().min().unwrap_or(&0);
+    let max = *values.iter().max().unwrap_or(&0);
+    (min + max) / 2
+}
+
+fn digits_i128(value: i128) -> u32 {
+    let mut v = value.abs();
+    if v == 0 {
+        return 1;
+    }
+    let mut digits = 0u32;
+    while v > 0 {
+        v /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn bit_len_i128(value: i128) -> u32 {
+    let v = value.unsigned_abs();
+    let bits = 128u32.saturating_sub(v.leading_zeros());
+    if bits == 0 { 1 } else { bits }
+}
+
+fn varint_len_i128(value: i128) -> u32 {
+    let bits = bit_len_i128(value);
+    ((bits + 6) / 7).max(1)
+}
+
+fn format_i128_list(values: &[i128]) -> String {
+    values
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn abs_diff_counted(a: &BigUint, b: &BigUint) -> (BigUint, bool) {
     match a.cmp(b) {
         Ordering::Greater => (a - b, false),
@@ -1071,6 +1304,15 @@ enum EstimateMode {
     Random,
     Adversarial,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum CompressionScheme {
+    MinMaxAbs,
+    MinTotalAbs,
+    MinDigitCount,
+    MinBitCount,
+    MinVarintSize,
 }
 
 fn run_estimate_any_factor(
@@ -1902,6 +2144,9 @@ mod tests {
             "10",
             "--n-times",
             "3",
+            "--compress-seqA",
+            "--compress-scheme",
+            "min-total-abs",
         ]);
         match cli.cmd {
             Command::NearPower {
@@ -1910,12 +2155,18 @@ mod tests {
                 base_binary,
                 base_little_endian,
                 n_times,
+                compress_seq_a,
+                compress_seq_b,
+                compress_scheme,
             } => {
                 assert!(base_input.is_none());
                 assert_eq!(base_number, Some("10".to_string()));
                 assert!(!base_binary);
                 assert!(!base_little_endian);
                 assert_eq!(n_times, 3);
+                assert!(compress_seq_a);
+                assert!(!compress_seq_b);
+                assert_eq!(compress_scheme, CompressionScheme::MinTotalAbs);
             }
             _ => panic!("expected near-power command"),
         }
@@ -1940,12 +2191,18 @@ mod tests {
                 base_binary,
                 base_little_endian,
                 n_times,
+                compress_seq_a,
+                compress_seq_b,
+                compress_scheme,
             } => {
                 assert_eq!(base_input, Some(PathBuf::from("base.bin")));
                 assert!(base_number.is_none());
                 assert!(base_binary);
                 assert!(base_little_endian);
                 assert_eq!(n_times, 1);
+                assert!(!compress_seq_a);
+                assert!(!compress_seq_b);
+                assert_eq!(compress_scheme, CompressionScheme::MinTotalAbs);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2015,6 +2272,30 @@ mod tests {
         let result = run_near_power_iterations(&base, &value, 5).unwrap();
         assert_eq!(result.iterations, 1);
         assert_eq!(result.final_delta, BigUint::from(1u8));
+    }
+
+    #[test]
+    fn compress_seq_a_min_total_abs_uses_median() {
+        let exps = vec![10u32, 20, 30];
+        let result = compress_sequence_a(&exps, CompressionScheme::MinTotalAbs);
+        assert_eq!(result.base, 20);
+        assert_eq!(result.deltas, vec![-10, 0, 10]);
+    }
+
+    #[test]
+    fn compress_seq_a_min_max_abs_uses_midrange() {
+        let exps = vec![10u32, 25, 40];
+        let result = compress_sequence_a(&exps, CompressionScheme::MinMaxAbs);
+        assert_eq!(result.base, 25);
+        assert_eq!(result.max_abs_delta, 15);
+    }
+
+    #[test]
+    fn compress_seq_b_deltas_are_consecutive_diffs() {
+        let exps = vec![10u32, 20, 15];
+        let result = compress_sequence_b(&exps, CompressionScheme::MinTotalAbs);
+        assert_eq!(result.base, 10);
+        assert_eq!(result.deltas, vec![10, -5]);
     }
 
     #[test]
@@ -2177,6 +2458,9 @@ mod tests {
                 base_binary,
                 base_little_endian,
                 n_times: _,
+                compress_seq_a: _,
+                compress_seq_b: _,
+                compress_scheme: _,
             } => load_base_biguint(
                 base_input.as_ref(),
                 base_number.as_deref(),
@@ -2208,6 +2492,9 @@ mod tests {
                 base_binary,
                 base_little_endian,
                 n_times: _,
+                compress_seq_a: _,
+                compress_seq_b: _,
+                compress_scheme: _,
             } => load_base_biguint(
                 base_input.as_ref(),
                 base_number.as_deref(),

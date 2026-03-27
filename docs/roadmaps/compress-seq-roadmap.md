@@ -7,56 +7,56 @@
 - Add `--compress-scheme` selector for optimization objective.
 
 ## CLI + Config
-- [ ] Add `--compress-seqA` (mutually exclusive with `--compress-seqB`).
-- [ ] Add `--compress-seqB` (mutually exclusive with `--compress-seqA`).
-- [ ] Add `--compress-scheme` with options:
+- [x] Add `--compress-seqA` (mutually exclusive with `--compress-seqB`).
+- [x] Add `--compress-seqB` (mutually exclusive with `--compress-seqA`).
+- [x] Add `--compress-scheme` with options:
   - `min-max-abs` (minimize max |delta|)
   - `min-total-abs` (minimize sum |delta|)
   - `min-digit-count` (minimize total digit count)
-- [ ] Add `CompressionScheme` enum + clap ValueEnum.
-- [ ] Validate compression flags only apply to `near-power`.
-- [ ] Define default scheme (if none provided).
+- [x] Add `CompressionScheme` enum + clap ValueEnum.
+- [x] Validate compression flags only apply to `near-power`.
+- [x] Define default scheme (if none provided).
 
 ## Compression Mode A (Base + Deltas)
-- [ ] Compute base `B` and deltas `d_i = e_i - B`.
+- [x] Compute base `B` and deltas `d_i = e_i - B`.
 - [ ] Implement scheme selection:
-  - [ ] `min-max-abs`: choose `B` to minimize max |d_i|.
-  - [ ] `min-total-abs`: choose `B` to minimize sum |d_i|.
-  - [ ] `min-digit-count`: choose `B` to minimize total digit count of `B` + deltas.
-- [ ] Emit compressed output format for seqA.
-- [ ] Add stats: base, max |d|, sum |d|, digit count.
+  - [x] `min-max-abs`: choose `B` to minimize max |d_i|.
+  - [x] `min-total-abs`: choose `B` to minimize sum |d_i|.
+  - [x] `min-digit-count`: choose `B` to minimize total digit count of `B` + deltas.
+- [x] Emit compressed output format for seqA.
+- [x] Add stats: base, max |d|, sum |d|, digit count.
 
 ## Compression Mode B (Delta Sequence)
-- [ ] Compute `e_0` and `Δe_i = e_i - e_{i-1}`.
-- [ ] Implement scheme selection:
-  - [ ] `min-max-abs`: minimize max |Δe_i| (if no reorder, this is fixed).
-  - [ ] `min-total-abs`: minimize sum |Δe_i| (fixed without reorder).
-  - [ ] `min-digit-count`: minimize total digit count of `e_0` + deltas.
-- [ ] Decide whether sequence order is preserved (default yes).
-- [ ] Emit compressed output format for seqB.
-- [ ] Add stats: max |Δ|, sum |Δ|, digit count.
+- [x] Compute `e_0` and `Δe_i = e_i - e_{i-1}`.
+- [x] Implement scheme selection:
+  - [x] `min-max-abs`: minimize max |Δe_i| (if no reorder, this is fixed).
+  - [x] `min-total-abs`: minimize sum |Δe_i| (fixed without reorder).
+  - [x] `min-digit-count`: minimize total digit count of `e_0` + deltas.
+- [x] Decide whether sequence order is preserved (default yes).
+- [x] Emit compressed output format for seqB.
+- [x] Add stats: max |Δ|, sum |Δ|, digit count.
 
 ## Optimization Schemes
-- [ ] `min-max-abs`: center to minimize max absolute delta.
-- [ ] `min-total-abs`: median-based minimization.
-- [ ] `min-digit-count`: minimize digit length (base + deltas).
+- [x] `min-max-abs`: center to minimize max absolute delta.
+- [x] `min-total-abs`: median-based minimization.
+- [x] `min-digit-count`: minimize digit length (base + deltas).
 - [ ] Optional additional schemes:
-  - [ ] `min-bit-count`: minimize total bit-length of stored ints.
-  - [ ] `min-varint-size`: minimize varint-encoded byte size.
+  - [x] `min-bit-count`: minimize total bit-length of stored ints.
+  - [x] `min-varint-size`: minimize varint-encoded byte size.
   - [ ] `min-signed-avg`: bias around mean to reduce signed average magnitude.
 
 ## Output Format
-- [ ] Define structured output (JSON or tagged lines).
-- [ ] Include scheme name, base, deltas, and summary metrics.
-- [ ] Preserve existing exponent list output if compression not enabled.
+- [x] Define structured output (JSON or tagged lines).
+- [x] Include scheme name, base, deltas, and summary metrics.
+- [x] Preserve existing exponent list output if compression not enabled.
 
 ## Logging
-- [ ] Per-run compression log: scheme, mode, base, metrics.
-- [ ] Include compression metrics alongside existing near-power stats.
+- [x] Per-run compression log: scheme, mode, base, metrics.
+- [x] Include compression metrics alongside existing near-power stats.
 
 ## Tests
-- [ ] Unit tests for seqA base selection under each scheme.
-- [ ] Unit tests for seqB deltas and scheme behavior.
+- [x] Unit tests for seqA base selection under each scheme.
+- [x] Unit tests for seqB deltas and scheme behavior.
 - [ ] Golden output tests for small known sequences.
 
 ## Docs
