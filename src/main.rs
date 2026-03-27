@@ -866,6 +866,7 @@ fn run_near_power_iterations(
         let delta_digits = biguint_decimal_digits(&result.delta);
         let power_percent = percent_of_value_string(&remaining, &result.power);
         let percent_delta = percent_delta_string(&remaining, &result.delta);
+        let cumulative_coverage_percent = coverage_percent_string(value, &result.delta);
         let power_over = result.power >= remaining;
         info!(
             iteration = idx,
@@ -883,6 +884,7 @@ fn run_near_power_iterations(
             power_over,
             percent_delta = %percent_delta,
             power_percent = %power_percent,
+            cumulative_coverage_percent = %cumulative_coverage_percent,
             "near-power iteration complete"
         );
 
