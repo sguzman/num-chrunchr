@@ -121,6 +121,9 @@ enum Command {
         /// Use prime numbers as bases for each round (2,3,5,7,11,...)
         #[arg(long, default_value_t = false)]
         prime_rounds: bool,
+        /// Disable log-estimate fast path for non-power-of-2 bases
+        #[arg(long, default_value_t = false)]
+        no_log_estimate: bool,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -342,6 +345,7 @@ fn main() -> Result<()> {
             compress_scheme,
             no_overshoot,
             prime_rounds,
+            no_log_estimate,
         } => {
             let source = source
                 .as_ref()
@@ -365,7 +369,12 @@ fn main() -> Result<()> {
             let iter_result = if prime_rounds {
                 let primes = first_n_primes(n_times as usize);
                 let bases: Vec<BigUint> = primes.iter().map(|&p| BigUint::from(p)).collect();
-                run_near_power_iterations_with_bases(&bases, &value, no_overshoot)?
+                run_near_power_iterations_with_bases(
+                    &bases,
+                    &value,
+                    no_overshoot,
+                    no_log_estimate,
+                )?
             } else {
                 let base = load_base_biguint(
                     base_input.as_ref(),
@@ -374,7 +383,13 @@ fn main() -> Result<()> {
                     base_binary,
                     base_little_endian,
                 )?;
-                run_near_power_iterations(&base, &value, n_times, no_overshoot)?
+                run_near_power_iterations(
+                    &base,
+                    &value,
+                    n_times,
+                    no_overshoot,
+                    no_log_estimate,
+                )?
             };
             let exponent_list = iter_result
                 .exponents
@@ -817,6 +832,7 @@ fn nearest_power_exponent(
     base: &BigUint,
     value: &BigUint,
     no_overshoot: bool,
+    no_log_estimate: bool,
 ) -> Result<NearPowerResult> {
     let two = BigUint::from(2u8);
     if base < &two {
@@ -914,7 +930,7 @@ fn nearest_power_exponent(
         return Ok(best);
     }
 
-    let (floor, checked) = floor_log_biguint(base, value)?;
+    let (floor, checked) = floor_log_biguint(base, value, no_log_estimate)?;
     let power_floor = base.pow(floor);
     let (delta_floor, delta_floor_exact) = abs_diff_counted(value, &power_floor);
     let mut best = NearPowerResult {
@@ -974,6 +990,7 @@ fn run_near_power_iterations(
     value: &BigUint,
     n_times: u32,
     no_overshoot: bool,
+    no_log_estimate: bool,
 ) -> Result<NearPowerIterations> {
     let base_bits = base.bits();
     let mut remaining = value.clone();
@@ -986,7 +1003,7 @@ fn run_near_power_iterations(
     let mut exponents = Vec::new();
 
     for idx in 1..=n_times {
-        let result = nearest_power_exponent(base, &remaining, no_overshoot)?;
+        let result = nearest_power_exponent(base, &remaining, no_overshoot, no_log_estimate)?;
         let delta_base10_digits = biguint_decimal_digits(&result.delta);
         let delta_base2_digits = result.delta.bits().max(1);
         let power_percent = percent_of_value_string(&remaining, &result.power);
@@ -1051,6 +1068,7 @@ fn run_near_power_iterations_with_bases(
     bases: &[BigUint],
     value: &BigUint,
     no_overshoot: bool,
+    no_log_estimate: bool,
 ) -> Result<NearPowerIterations> {
     let mut remaining = value.clone();
     let mut total_power = BigUint::from(0u8);
@@ -1062,7 +1080,7 @@ fn run_near_power_iterations_with_bases(
     let mut exponents = Vec::new();
 
     for (idx, base) in bases.iter().enumerate() {
-        let result = nearest_power_exponent(base, &remaining, no_overshoot)?;
+        let result = nearest_power_exponent(base, &remaining, no_overshoot, no_log_estimate)?;
         let delta_base10_digits = biguint_decimal_digits(&result.delta);
         let delta_base2_digits = result.delta.bits().max(1);
         let power_percent = percent_of_value_string(&remaining, &result.power);
@@ -1379,7 +1397,11 @@ fn coverage_percent_string(value: &BigUint, remaining: &BigUint) -> String {
     format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
 }
 
-fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
+fn floor_log_biguint(
+    base: &BigUint,
+    value: &BigUint,
+    no_log_estimate: bool,
+) -> Result<(u32, u64)> {
     if value.is_zero() {
         return Ok((0, 1));
     }
@@ -1400,6 +1422,26 @@ fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
     };
     if max_k > u32::MAX as u64 {
         bail!("exponent exceeds u32::MAX; base too small for this input");
+    }
+
+    if no_log_estimate {
+        let mut lo = 0u32;
+        let mut hi = max_k as u32;
+        let mut checked = 0u64;
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            match pow_cmp(base, mid, value) {
+                Ordering::Greater => {
+                    checked += 1;
+                    hi = mid.saturating_sub(1);
+                }
+                Ordering::Equal | Ordering::Less => {
+                    checked += 1;
+                    lo = mid;
+                }
+            }
+        }
+        return Ok((lo, checked.max(1)));
     }
 
     // Fast path: estimate k via logs, then adjust locally.
@@ -2391,6 +2433,7 @@ mod tests {
                 compress_scheme,
                 no_overshoot,
                 prime_rounds,
+                no_log_estimate,
             } => {
                 assert!(base_input.is_none());
                 assert_eq!(base_number, Some("10".to_string()));
@@ -2402,6 +2445,7 @@ mod tests {
                 assert_eq!(compress_scheme, CompressionScheme::MinTotalAbs);
                 assert!(!no_overshoot);
                 assert!(!prime_rounds);
+                assert!(!no_log_estimate);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2431,6 +2475,7 @@ mod tests {
                 compress_scheme,
                 no_overshoot,
                 prime_rounds,
+                no_log_estimate,
             } => {
                 assert_eq!(base_input, Some(PathBuf::from("base.bin")));
                 assert!(base_number.is_none());
@@ -2442,6 +2487,7 @@ mod tests {
                 assert_eq!(compress_scheme, CompressionScheme::MinTotalAbs);
                 assert!(!no_overshoot);
                 assert!(!prime_rounds);
+                assert!(!no_log_estimate);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2451,7 +2497,7 @@ mod tests {
     fn nearest_power_prefers_lower_on_tie() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(6u8);
-        let result = nearest_power_exponent(&base, &value, false).unwrap();
+        let result = nearest_power_exponent(&base, &value, false, false).unwrap();
         assert_eq!(result.exponent, 2);
     }
 
@@ -2459,7 +2505,7 @@ mod tests {
     fn nearest_power_selects_closer_exponent() {
         let base = BigUint::from(10u8);
         let value = BigUint::from(900u16);
-        let result = nearest_power_exponent(&base, &value, false).unwrap();
+        let result = nearest_power_exponent(&base, &value, false, false).unwrap();
         assert_eq!(result.exponent, 3);
     }
 
@@ -2467,7 +2513,7 @@ mod tests {
     fn near_power_iterations_stop_on_exact_match() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(6u8);
-        let result = run_near_power_iterations(&base, &value, 5, false).unwrap();
+        let result = run_near_power_iterations(&base, &value, 5, false, false).unwrap();
         assert_eq!(result.exponents, vec![2, 1]);
         assert_eq!(result.iterations, 2);
         assert_eq!(result.total_power, BigUint::from(6u8));
@@ -2478,7 +2524,7 @@ mod tests {
     fn power_of_two_fast_path_matches_pow_for_small_cases() {
         let base = BigUint::from(8u8);
         let value = BigUint::from(500u16);
-        let result = nearest_power_exponent(&base, &value, false).unwrap();
+        let result = nearest_power_exponent(&base, &value, false, false).unwrap();
         let rebuilt = base.pow(result.exponent);
         assert_eq!(rebuilt, result.power);
         assert!(result.fast_path);
@@ -2489,7 +2535,7 @@ mod tests {
     fn near_power_iterations_match_top_bits_for_base_two() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(44u8); // 0b101100
-        let result = run_near_power_iterations(&base, &value, 5, false).unwrap();
+        let result = run_near_power_iterations(&base, &value, 5, false, false).unwrap();
         assert_eq!(result.exponents, vec![5, 3, 2]);
         assert_eq!(result.iterations, 3);
         assert_eq!(result.final_delta, BigUint::from(0u8));
@@ -2499,7 +2545,7 @@ mod tests {
     fn nearest_power_zero_returns_exponent_zero() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(0u8);
-        let result = nearest_power_exponent(&base, &value, false).unwrap();
+        let result = nearest_power_exponent(&base, &value, false, false).unwrap();
         assert_eq!(result.exponent, 0);
         assert_eq!(result.delta, BigUint::from(1u8));
     }
@@ -2508,7 +2554,7 @@ mod tests {
     fn near_power_iterations_zero_value_stops_immediately() {
         let base = BigUint::from(4u8);
         let value = BigUint::from(0u8);
-        let result = run_near_power_iterations(&base, &value, 5, false).unwrap();
+        let result = run_near_power_iterations(&base, &value, 5, false, false).unwrap();
         assert_eq!(result.iterations, 1);
         assert_eq!(result.final_delta, BigUint::from(1u8));
     }
@@ -2517,7 +2563,7 @@ mod tests {
     fn no_overshoot_keeps_power_under_target() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(6u8);
-        let result = nearest_power_exponent(&base, &value, true).unwrap();
+        let result = nearest_power_exponent(&base, &value, true, false).unwrap();
         assert_eq!(result.exponent, 2);
         assert!(result.power <= value);
     }
