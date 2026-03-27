@@ -1355,10 +1355,7 @@ fn percent_of_value_string(value: &BigUint, power: &BigUint) -> String {
     let scale = BigUint::from(1_000_000u64);
     let factor = BigUint::from(100_000_000u64);
     let scaled = (power * &factor) / value;
-    let integer = &scaled / &scale;
-    let frac = &scaled % &scale;
-    let frac_u64 = frac.to_u64().unwrap_or(0);
-    format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
+    format_percent_scaled(scaled, scale, factor)
 }
 
 fn percent_delta_string(value: &BigUint, delta: &BigUint) -> String {
@@ -1372,10 +1369,7 @@ fn percent_delta_string(value: &BigUint, delta: &BigUint) -> String {
     let scale = BigUint::from(1_000_000u64);
     let factor = BigUint::from(100_000_000u64);
     let scaled = (delta * &factor) / value;
-    let integer = &scaled / &scale;
-    let frac = &scaled % &scale;
-    let frac_u64 = frac.to_u64().unwrap_or(0);
-    format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
+    format_percent_scaled(scaled, scale, factor)
 }
 
 fn coverage_percent_string(value: &BigUint, remaining: &BigUint) -> String {
@@ -1391,9 +1385,22 @@ fn coverage_percent_string(value: &BigUint, remaining: &BigUint) -> String {
     } else {
         &factor - scaled
     };
-    let integer = &coverage_scaled / &scale;
-    let frac = &coverage_scaled % &scale;
+    format_percent_scaled(coverage_scaled, scale, factor)
+}
+
+fn format_percent_scaled(scaled: BigUint, scale: BigUint, _factor: BigUint) -> String {
+    let integer = &scaled / &scale;
+    let frac = &scaled % &scale;
     let frac_u64 = frac.to_u64().unwrap_or(0);
+    if integer.is_zero() && frac_u64 < 10 {
+        // Use scientific notation for extremely small percentages (< 0.000010%).
+        let denom = match frac_u64 {
+            0 => 1_000_000u64,
+            _ => 1_000_000u64,
+        };
+        let value = (frac_u64 as f64) / (denom as f64);
+        return format!("{value:.3e}%");
+    }
     format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
 }
 
