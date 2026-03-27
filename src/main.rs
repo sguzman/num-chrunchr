@@ -1402,23 +1402,70 @@ fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
         bail!("exponent exceeds u32::MAX; base too small for this input");
     }
 
-    let mut lo = 0u32;
-    let mut hi = max_k as u32;
-    let mut checked = 0u64;
-    while lo < hi {
-        let mid = lo + (hi - lo + 1) / 2;
-        match pow_cmp(base, mid, value) {
+    // Fast path: estimate k via logs, then adjust locally.
+    let (approx_k, mut checked) = estimate_floor_log(base, value)?;
+    let mut k = approx_k.min(max_k as u32);
+
+    // Adjust downward if we overshot.
+    let mut guard = 0u32;
+    loop {
+        let cmp = pow_cmp(base, k, value);
+        checked += 1;
+        match cmp {
             Ordering::Greater => {
-                checked += 1;
-                hi = mid.saturating_sub(1);
+                if k == 0 {
+                    return Ok((0, checked.max(1)));
+                }
+                k -= 1;
             }
-            Ordering::Equal | Ordering::Less => {
-                checked += 1;
-                lo = mid;
-            }
+            Ordering::Equal | Ordering::Less => break,
+        }
+        guard += 1;
+        if guard > 6 {
+            break;
         }
     }
-    Ok((lo, checked.max(1)))
+
+    // Adjust upward if we can still increase.
+    guard = 0;
+    loop {
+        if k == u32::MAX {
+            break;
+        }
+        let next = k + 1;
+        let cmp = pow_cmp(base, next, value);
+        checked += 1;
+        if matches!(cmp, Ordering::Greater) {
+            break;
+        }
+        k = next;
+        guard += 1;
+        if guard > 6 {
+            break;
+        }
+    }
+
+    // Fallback to binary search if estimate was too far off.
+    if guard > 6 {
+        let mut lo = 0u32;
+        let mut hi = max_k as u32;
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            match pow_cmp(base, mid, value) {
+                Ordering::Greater => {
+                    checked += 1;
+                    hi = mid.saturating_sub(1);
+                }
+                Ordering::Equal | Ordering::Less => {
+                    checked += 1;
+                    lo = mid;
+                }
+            }
+        }
+        return Ok((lo, checked.max(1)));
+    }
+
+    Ok((k, checked.max(1)))
 }
 
 fn pow_cmp(base: &BigUint, exp: u32, target: &BigUint) -> Ordering {
@@ -1443,6 +1490,44 @@ fn pow_cmp(base: &BigUint, exp: u32, target: &BigUint) -> Ordering {
         base_pow = &base_pow * &base_pow;
     }
     result.cmp(target)
+}
+
+fn estimate_floor_log(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
+    if value.is_zero() {
+        return Ok((0, 1));
+    }
+    let ln_n = ln_biguint(value)?;
+    let ln_b = ln_biguint(base)?;
+    if !ln_b.is_finite() || ln_b <= 0.0 {
+        bail!("invalid base for log estimate");
+    }
+    let k = (ln_n / ln_b).floor();
+    if !k.is_finite() || k < 0.0 {
+        return Ok((0, 1));
+    }
+    let k_u64 = k as u64;
+    if k_u64 > u32::MAX as u64 {
+        bail!("exponent exceeds u32::MAX; base too small for this input");
+    }
+    Ok((k_u64 as u32, 1))
+}
+
+fn ln_biguint(value: &BigUint) -> Result<f64> {
+    let bit_len = value.bits();
+    if bit_len == 0 {
+        return Ok(f64::NEG_INFINITY);
+    }
+    let shift = bit_len.saturating_sub(53);
+    let top = if shift > 0 {
+        (value >> shift)
+            .to_u64()
+            .ok_or_else(|| anyhow::anyhow!("failed to normalize input"))? as f64
+    } else {
+        value
+            .to_u64()
+            .ok_or_else(|| anyhow::anyhow!("failed to normalize input"))? as f64
+    };
+    Ok(top.ln() + (shift as f64) * std::f64::consts::LN_2)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
