@@ -327,6 +327,8 @@ fn main() -> Result<()> {
                 config.stream.buffer_size,
             )?;
             let result = nearest_power_exponent(&base, &value)?;
+            let delta_digits = biguint_decimal_digits(&result.delta);
+            let delta_percent = percent_delta_string(&value, &result.power);
             println!("{}", result.exponent);
             info!(
                 base_bits = base.bits(),
@@ -334,6 +336,9 @@ fn main() -> Result<()> {
                 exponent = result.exponent,
                 power_bits = result.power.bits(),
                 delta_bits = result.delta.bits(),
+                delta_digits,
+                exponents_checked = result.exponents_checked,
+                delta_percent = %delta_percent,
                 "near-power command complete"
             );
         }
@@ -576,6 +581,7 @@ struct NearPowerResult {
     exponent: u32,
     power: BigUint,
     delta: BigUint,
+    exponents_checked: u64,
 }
 
 fn load_base_biguint(
@@ -619,16 +625,18 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
             exponent: 0,
             power,
             delta,
+            exponents_checked: 1,
         });
     }
 
-    let floor = floor_log_biguint(base, value)?;
+    let (floor, checked) = floor_log_biguint(base, value)?;
     let power_floor = base.pow(floor);
     let delta_floor = abs_diff(value, &power_floor);
     let mut best = NearPowerResult {
         exponent: floor,
         power: power_floor,
         delta: delta_floor,
+        exponents_checked: checked,
     };
 
     if floor < u32::MAX {
@@ -640,11 +648,13 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
             Ordering::Equal => false,
             Ordering::Greater => false,
         };
+        best.exponents_checked += 1;
         if better {
             best = NearPowerResult {
                 exponent: hi,
                 power: power_hi,
                 delta: delta_hi,
+                exponents_checked: best.exponents_checked,
             };
         }
     }
@@ -660,9 +670,36 @@ fn abs_diff(a: &BigUint, b: &BigUint) -> BigUint {
     }
 }
 
-fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<u32> {
+fn biguint_decimal_digits(value: &BigUint) -> u64 {
     if value.is_zero() {
-        return Ok(0);
+        return 1;
+    }
+    let bits = value.bits();
+    if bits == 0 {
+        return 1;
+    }
+    ((bits - 1) as f64 * std::f64::consts::LOG10_2).floor() as u64 + 1
+}
+
+fn percent_delta_string(value: &BigUint, power: &BigUint) -> String {
+    if value.is_zero() {
+        return "inf".to_string();
+    }
+
+    let sign = if power >= value { "" } else { "-" };
+    let delta = abs_diff(value, power);
+    let scale = BigUint::from(1_000_000u64);
+    let factor = BigUint::from(100_000_000u64);
+    let scaled = (&delta * factor) / value;
+    let integer = &scaled / &scale;
+    let frac = &scaled % &scale;
+    let frac_u64 = frac.to_u64().unwrap_or(0);
+    format!("{sign}{}.{:06}%", integer.to_str_radix(10), frac_u64)
+}
+
+fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
+    if value.is_zero() {
+        return Ok((0, 1));
     }
     if base <= &BigUint::from(1u8) {
         bail!("base must be >= 2");
@@ -671,7 +708,7 @@ fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<u32> {
     let value_bits = value.bits();
     let base_bits = base.bits();
     if base_bits <= 1 {
-        return Ok(0);
+        return Ok((0, 1));
     }
 
     let max_k = if value_bits <= 1 {
@@ -685,18 +722,21 @@ fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<u32> {
 
     let mut lo = 0u32;
     let mut hi = max_k as u32;
+    let mut checked = 0u64;
     while lo < hi {
         let mid = lo + (hi - lo + 1) / 2;
         match pow_cmp(base, mid, value) {
             Ordering::Greater => {
+                checked += 1;
                 hi = mid.saturating_sub(1);
             }
             Ordering::Equal | Ordering::Less => {
+                checked += 1;
                 lo = mid;
             }
         }
     }
-    Ok(lo)
+    Ok((lo, checked.max(1)))
 }
 
 fn pow_cmp(base: &BigUint, exp: u32, target: &BigUint) -> Ordering {
