@@ -89,11 +89,7 @@ enum Command {
         out: Option<PathBuf>,
     },
     /// Find the exponent k where base^k is closest to N
-    #[command(group(
-        ArgGroup::new("base_source")
-            .args(["base_input", "base_number"])
-            .required(true)
-    ))]
+    #[command(group(ArgGroup::new("base_source").args(["base_input", "base_number"])))]
     NearPower {
         /// Decimal file containing digits of the base
         #[arg(long)]
@@ -122,6 +118,9 @@ enum Command {
         /// Disallow overshooting the target (force power <= target)
         #[arg(long, default_value_t = false)]
         no_overshoot: bool,
+        /// Use prime numbers as bases for each round (2,3,5,7,11,...)
+        #[arg(long, default_value_t = false)]
+        prime_rounds: bool,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -342,6 +341,7 @@ fn main() -> Result<()> {
             compress_seq_b,
             compress_scheme,
             no_overshoot,
+            prime_rounds,
         } => {
             let source = source
                 .as_ref()
@@ -349,17 +349,33 @@ fn main() -> Result<()> {
             let prepared = source.prepare()?;
             let value =
                 load_biguint_from_input(&prepared.path, config.stream.buffer_size, encoding)?;
-            let base = load_base_biguint(
-                base_input.as_ref(),
-                base_number.as_deref(),
-                config.stream.buffer_size,
-                base_binary,
-                base_little_endian,
-            )?;
+            if prime_rounds {
+                if base_input.is_some() || base_number.is_some() {
+                    bail!("--prime-rounds cannot be combined with --base-input/--base-number");
+                }
+                if base_binary || base_little_endian {
+                    bail!("--prime-rounds cannot be combined with base binary flags");
+                }
+            } else if base_input.is_none() && base_number.is_none() {
+                bail!("provide --base-input or --base-number");
+            }
             if n_times == 0 {
                 bail!("--n-times must be >= 1");
             }
-            let iter_result = run_near_power_iterations(&base, &value, n_times, no_overshoot)?;
+            let iter_result = if prime_rounds {
+                let primes = first_n_primes(n_times as usize);
+                let bases: Vec<BigUint> = primes.iter().map(|&p| BigUint::from(p)).collect();
+                run_near_power_iterations_with_bases(&bases, &value, no_overshoot)?
+            } else {
+                let base = load_base_biguint(
+                    base_input.as_ref(),
+                    base_number.as_deref(),
+                    config.stream.buffer_size,
+                    base_binary,
+                    base_little_endian,
+                )?;
+                run_near_power_iterations(&base, &value, n_times, no_overshoot)?
+            };
             let exponent_list = iter_result
                 .exponents
                 .iter()
@@ -401,8 +417,11 @@ fn main() -> Result<()> {
             let total_delta_base2_digits = iter_result.total_delta.bits().max(1);
             let final_delta_base10_digits = biguint_decimal_digits(&iter_result.final_delta);
             let final_delta_base2_digits = iter_result.final_delta.bits().max(1);
+            let base_mode = if prime_rounds { "prime_rounds" } else { "fixed_base" };
+            let base_bits = if prime_rounds { None } else { Some(iter_result.base_bits) };
             info!(
-                base_bits = base.bits(),
+                base_bits = ?base_bits,
+                base_mode,
                 value_bits = value.bits(),
                 base_binary,
                 base_little_endian,
@@ -681,6 +700,7 @@ struct NearPowerIterations {
     fast_path_used_count: u64,
     total_shift_bits: u64,
     final_delta: BigUint,
+    base_bits: u64,
 }
 
 struct CompressionResult {
@@ -759,6 +779,36 @@ fn power_of_two_base_exponent(base: &BigUint) -> Option<u32> {
         }
     }
     None
+}
+
+fn first_n_primes(n: usize) -> Vec<u64> {
+    let mut primes = Vec::with_capacity(n);
+    if n == 0 {
+        return primes;
+    }
+    let mut candidate = 2u64;
+    while primes.len() < n {
+        if is_prime_with_list(candidate, &primes) {
+            primes.push(candidate);
+        }
+        candidate = if candidate == 2 { 3 } else { candidate + 2 };
+    }
+    primes
+}
+
+fn is_prime_with_list(candidate: u64, primes: &[u64]) -> bool {
+    if candidate < 2 {
+        return false;
+    }
+    for &p in primes {
+        if p * p > candidate {
+            break;
+        }
+        if candidate % p == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn nearest_power_exponent(
@@ -923,6 +973,7 @@ fn run_near_power_iterations(
     n_times: u32,
     no_overshoot: bool,
 ) -> Result<NearPowerIterations> {
+    let base_bits = base.bits();
     let mut remaining = value.clone();
     let mut total_power = BigUint::from(0u8);
     let mut total_delta = BigUint::from(0u8);
@@ -988,6 +1039,81 @@ fn run_near_power_iterations(
         fast_path_used_count,
         total_shift_bits,
         final_delta: remaining,
+        base_bits,
+    })
+}
+
+fn run_near_power_iterations_with_bases(
+    bases: &[BigUint],
+    value: &BigUint,
+    no_overshoot: bool,
+) -> Result<NearPowerIterations> {
+    let mut remaining = value.clone();
+    let mut total_power = BigUint::from(0u8);
+    let mut total_delta = BigUint::from(0u8);
+    let mut total_exponents_checked = 0u64;
+    let mut total_comparisons = 0u64;
+    let mut fast_path_used_count = 0u64;
+    let mut total_shift_bits = 0u64;
+    let mut exponents = Vec::new();
+
+    for (idx, base) in bases.iter().enumerate() {
+        let result = nearest_power_exponent(base, &remaining, no_overshoot)?;
+        let delta_base10_digits = biguint_decimal_digits(&result.delta);
+        let delta_base2_digits = result.delta.bits().max(1);
+        let power_percent = percent_of_value_string(&remaining, &result.power);
+        let percent_delta = percent_delta_string(&remaining, &result.delta);
+        let cumulative_coverage_percent = coverage_percent_string(value, &result.delta);
+        let power_over = result.power >= remaining;
+        info!(
+            iteration = (idx + 1),
+            base_bits = base.bits(),
+            value_bits = remaining.bits(),
+            fast_path = result.fast_path,
+            power_of_two_m = result.power_of_two_m,
+            k_floor = result.k_floor,
+            exponent = result.exponent,
+            power_bits = result.power.bits(),
+            delta_bits = result.delta.bits(),
+            delta_base10_digits,
+            delta_base2_digits,
+            exponents_checked = result.exponents_checked,
+            comparisons = result.comparisons,
+            power_over,
+            percent_delta = %percent_delta,
+            power_percent = %power_percent,
+            cumulative_coverage_percent = %cumulative_coverage_percent,
+            "near-power iteration complete"
+        );
+
+        total_power += &result.power;
+        total_delta += &result.delta;
+        total_exponents_checked += result.exponents_checked;
+        total_comparisons += result.comparisons;
+        if result.fast_path {
+            fast_path_used_count += 1;
+            total_shift_bits = total_shift_bits.saturating_add(result.shift_bits_used);
+        }
+        exponents.push(result.exponent);
+
+        remaining = result.delta;
+        if remaining.is_zero() {
+            break;
+        }
+    }
+
+    let iterations = exponents.len() as u32;
+    Ok(NearPowerIterations {
+        exponents,
+        iterations,
+        total_power,
+        total_delta,
+        total_exponents_checked,
+        total_comparisons,
+        fast_path_used_count,
+        total_shift_bits,
+        final_delta: remaining,
+        base_bits: 0,
     })
 }
 
@@ -2174,6 +2300,7 @@ mod tests {
                 compress_seq_b,
                 compress_scheme,
                 no_overshoot,
+                prime_rounds,
             } => {
                 assert!(base_input.is_none());
                 assert_eq!(base_number, Some("10".to_string()));
@@ -2184,6 +2311,7 @@ mod tests {
                 assert!(!compress_seq_b);
                 assert_eq!(compress_scheme, CompressionScheme::MinTotalAbs);
                 assert!(!no_overshoot);
+                assert!(!prime_rounds);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2212,6 +2340,7 @@ mod tests {
                 compress_seq_b,
                 compress_scheme,
                 no_overshoot,
+                prime_rounds,
             } => {
                 assert_eq!(base_input, Some(PathBuf::from("base.bin")));
                 assert!(base_number.is_none());
@@ -2222,6 +2351,7 @@ mod tests {
                 assert!(!compress_seq_b);
                 assert_eq!(compress_scheme, CompressionScheme::MinTotalAbs);
                 assert!(!no_overshoot);
+                assert!(!prime_rounds);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2300,6 +2430,12 @@ mod tests {
         let result = nearest_power_exponent(&base, &value, true).unwrap();
         assert_eq!(result.exponent, 2);
         assert!(result.power <= value);
+    }
+
+    #[test]
+    fn first_n_primes_returns_expected_sequence() {
+        let primes = first_n_primes(5);
+        assert_eq!(primes, vec![2, 3, 5, 7, 11]);
     }
 
     #[test]
@@ -2506,6 +2642,8 @@ mod tests {
                 compress_seq_a: _,
                 compress_seq_b: _,
                 compress_scheme: _,
+                no_overshoot: _,
+                prime_rounds: _,
             } => load_base_biguint(
                 base_input.as_ref(),
                 base_number.as_deref(),
@@ -2540,6 +2678,8 @@ mod tests {
                 compress_seq_a: _,
                 compress_seq_b: _,
                 compress_scheme: _,
+                no_overshoot: _,
+                prime_rounds: _,
             } => load_base_biguint(
                 base_input.as_ref(),
                 base_number.as_deref(),

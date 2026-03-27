@@ -103,6 +103,12 @@ Example:
 num-chrunchr --input big.bin --binary near-power --base-number 2 --n-times 5 \
   --compress-seqA --compress-scheme min-total-abs
 ```
+
+Prime-rounds mode (use primes as bases, no explicit base allowed):
+
+```
+num-chrunchr --input big.bin --binary near-power --prime-rounds --n-times 5
+```
   - Great: numbers like `a^b +/- c`, products, factorial-like forms, sparse sums
   - Allows: fast `mod p` without expansion via modular exponentiation
   - Enables: algebraic factor rules
