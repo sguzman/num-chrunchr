@@ -19,7 +19,7 @@
 ## Power Construction
 - [x] Build `power = 1 << (m*k)` using BigUint bit-shift, not repeated multiplication.
 - [x] Ensure shift uses `u64`/`usize` safely for very large `m*k`.
-- [ ] Add unit tests verifying equivalence to `base.pow(k)` for small cases.
+- [x] Add unit tests verifying equivalence to `base.pow(k)` for small cases.
 
 ## Delta Computation
 - [ ] Compute `delta = |N - power|` as today, but avoid extra clones where possible.
@@ -28,7 +28,7 @@
 ## Iterative Near-Power (`--n-times`)
 - [x] Reuse fast path for each delta iteration when base is `2^m`.
 - [x] Ensure `remaining` strictly decreases unless exact (to guarantee convergence).
-- [ ] Add tests that successive iterations correspond to top-set-bit extraction for base 2.
+- [x] Add tests that successive iterations correspond to top-set-bit extraction for base 2.
 
 ## Logging & Metrics
 - [x] Per-iteration tracing fields: `fast_path`, `m`, `k_floor`, `k_candidate`, `comparison_count` (expected 2).
@@ -47,5 +47,5 @@
 - [ ] Record runtime and memory stats in `reports/` for large sample inputs.
 
 ## Cleanup
-- [ ] Document fast path in `README.md` (near-power section).
-- [ ] Add a brief note in `docs/` describing why power-of-2 bases are trivial.
+- [x] Document fast path in `README.md` (near-power section).
+- [x] Add a brief note in `docs/` describing why power-of-2 bases are trivial.

@@ -736,6 +736,9 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
         }
         let k_floor = k_floor_u64 as u32;
         let shift_floor = m_u64.saturating_mul(k_floor_u64);
+        if shift_floor > usize::MAX as u64 {
+            bail!("shift exceeds addressable size for power-of-two fast path");
+        }
         let power_floor = BigUint::from(1u8) << (shift_floor as usize);
         let delta_floor = abs_diff(value, &power_floor);
         let mut best = NearPowerResult {
@@ -753,6 +756,9 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
         if k_floor < u32::MAX {
             let k_hi = k_floor + 1;
             let shift_hi = m_u64.saturating_mul(k_hi as u64);
+            if shift_hi > usize::MAX as u64 {
+                return Ok(best);
+            }
             let power_hi = BigUint::from(1u8) << (shift_hi as usize);
             let delta_hi = abs_diff(value, &power_hi);
             best.comparisons += 1;
@@ -1936,6 +1942,27 @@ mod tests {
         assert_eq!(result.iterations, 2);
         assert_eq!(result.total_power, BigUint::from(6u8));
         assert_eq!(result.total_delta, BigUint::from(2u8));
+    }
+
+    #[test]
+    fn power_of_two_fast_path_matches_pow_for_small_cases() {
+        let base = BigUint::from(8u8);
+        let value = BigUint::from(500u16);
+        let result = nearest_power_exponent(&base, &value).unwrap();
+        let rebuilt = base.pow(result.exponent);
+        assert_eq!(rebuilt, result.power);
+        assert!(result.fast_path);
+        assert_eq!(result.power_of_two_m, Some(3));
+    }
+
+    #[test]
+    fn near_power_iterations_match_top_bits_for_base_two() {
+        let base = BigUint::from(2u8);
+        let value = BigUint::from(44u8); // 0b101100
+        let result = run_near_power_iterations(&base, &value, 5).unwrap();
+        assert_eq!(result.exponents, vec![5, 3, 2]);
+        assert_eq!(result.iterations, 3);
+        assert_eq!(result.final_delta, BigUint::from(0u8));
     }
 
     #[test]

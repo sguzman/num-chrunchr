@@ -26,6 +26,7 @@ This repo currently provides a working MVP for **disk-backed decimal numbers** w
    - residue sketches (many `mod p`)
    - special-form detection (near-square, near-power, sparse expansions)
    - best known compressed representations
+   - power-of-two base fast paths (see `docs/power-of-2-bases.md`)
 3. **Scale beyond RAM**:
    - stream from disk (decimal and later limb files)
    - operate piecewise and persist intermediate states
