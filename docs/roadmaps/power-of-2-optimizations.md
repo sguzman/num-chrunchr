@@ -6,19 +6,19 @@
 - Keep observability high (tracing metrics for the fast path and fallbacks).
 
 ## Detection
-- [ ] Detect `base` as an exact power of 2 (single set bit) using `base.bits()` + check `base & (base - 1) == 0`.
-- [ ] Record `m = log2(base)` as the index of the set bit.
-- [ ] Add a trace field to indicate `fast_path=power_of_two` and `m` when active.
+- [x] Detect `base` as an exact power of 2 (single set bit) using `base.bits()` + check `base & (base - 1) == 0`.
+- [x] Record `m = log2(base)` as the index of the set bit.
+- [x] Add a trace field to indicate `fast_path=power_of_two` and `m` when active.
 
 ## Exponent Selection (Fast Path)
-- [ ] Compute `k_floor = floor((bit_length(N) - 1) / m)` with integer arithmetic only.
-- [ ] Compare `N` to `2^(m*k_floor)` and `2^(m*(k_floor+1))` using bit-length and one high-bit construction (no big exponentiation loops).
-- [ ] Select nearest exponent (tie -> lower exponent) with only two comparisons.
-- [ ] Guard against `k_floor+1` overflow of `u32` and clamp if needed.
+- [x] Compute `k_floor = floor((bit_length(N) - 1) / m)` with integer arithmetic only.
+- [x] Compare `N` to `2^(m*k_floor)` and `2^(m*(k_floor+1))` using bit-length and one high-bit construction (no big exponentiation loops).
+- [x] Select nearest exponent (tie -> lower exponent) with only two comparisons.
+- [x] Guard against `k_floor+1` overflow of `u32` and clamp if needed.
 
 ## Power Construction
-- [ ] Build `power = 1 << (m*k)` using BigUint bit-shift, not repeated multiplication.
-- [ ] Ensure shift uses `u64`/`usize` safely for very large `m*k`.
+- [x] Build `power = 1 << (m*k)` using BigUint bit-shift, not repeated multiplication.
+- [x] Ensure shift uses `u64`/`usize` safely for very large `m*k`.
 - [ ] Add unit tests verifying equivalence to `base.pow(k)` for small cases.
 
 ## Delta Computation
@@ -26,14 +26,14 @@
 - [ ] For `N` close to `power`, use early-exit compare to avoid full subtraction when possible.
 
 ## Iterative Near-Power (`--n-times`)
-- [ ] Reuse fast path for each delta iteration when base is `2^m`.
-- [ ] Ensure `remaining` strictly decreases unless exact (to guarantee convergence).
+- [x] Reuse fast path for each delta iteration when base is `2^m`.
+- [x] Ensure `remaining` strictly decreases unless exact (to guarantee convergence).
 - [ ] Add tests that successive iterations correspond to top-set-bit extraction for base 2.
 
 ## Logging & Metrics
-- [ ] Per-iteration tracing fields: `fast_path`, `m`, `k_floor`, `k_candidate`, `comparison_count` (expected 2).
-- [ ] Aggregate tracing fields: `fast_path_used_count`, `total_comparisons`, `total_shift_bits`.
-- [ ] Verify existing `power_percent`, `percent_delta`, `coverage_percent` remain consistent.
+- [x] Per-iteration tracing fields: `fast_path`, `m`, `k_floor`, `k_candidate`, `comparison_count` (expected 2).
+- [x] Aggregate tracing fields: `fast_path_used_count`, `total_comparisons`, `total_shift_bits`.
+- [x] Verify existing `power_percent`, `percent_delta`, `coverage_percent` remain consistent.
 
 ## Correctness Edge Cases
 - [ ] Handle `N = 0` (expect exponent 0, power 1, delta 1).

@@ -360,6 +360,9 @@ fn main() -> Result<()> {
                 base_little_endian,
                 iterations = iter_result.iterations,
                 total_exponents_checked = iter_result.total_exponents_checked,
+                total_comparisons = iter_result.total_comparisons,
+                fast_path_used_count = iter_result.fast_path_used_count,
+                total_shift_bits = iter_result.total_shift_bits,
                 total_power_bits = iter_result.total_power.bits(),
                 total_delta_bits = iter_result.total_delta.bits(),
                 total_delta_digits = biguint_decimal_digits(&iter_result.total_delta),
@@ -610,6 +613,11 @@ struct NearPowerResult {
     power: BigUint,
     delta: BigUint,
     exponents_checked: u64,
+    comparisons: u64,
+    fast_path: bool,
+    power_of_two_m: Option<u32>,
+    k_floor: Option<u32>,
+    shift_bits_used: u64,
 }
 
 struct NearPowerIterations {
@@ -618,6 +626,9 @@ struct NearPowerIterations {
     total_power: BigUint,
     total_delta: BigUint,
     total_exponents_checked: u64,
+    total_comparisons: u64,
+    fast_path_used_count: u64,
+    total_shift_bits: u64,
     final_delta: BigUint,
 }
 
@@ -668,6 +679,28 @@ fn parse_decimal_biguint(text: &str) -> Result<BigUint> {
         .ok_or_else(|| anyhow::anyhow!("failed to parse base number"))
 }
 
+fn power_of_two_base_exponent(base: &BigUint) -> Option<u32> {
+    if base.is_zero() {
+        return None;
+    }
+    let one = BigUint::from(1u8);
+    if base == &one {
+        return None;
+    }
+    let base_bits = base.bits();
+    if base_bits == 0 {
+        return None;
+    }
+    let base_minus_one = base - &one;
+    if (base & base_minus_one).is_zero() {
+        let exp = base_bits.saturating_sub(1);
+        if exp <= u32::MAX as u64 {
+            return Some(exp as u32);
+        }
+    }
+    None
+}
+
 fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerResult> {
     let two = BigUint::from(2u8);
     if base < &two {
@@ -682,7 +715,65 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
             power,
             delta,
             exponents_checked: 1,
+            comparisons: 1,
+            fast_path: false,
+            power_of_two_m: None,
+            k_floor: Some(0),
+            shift_bits_used: 0,
         });
+    }
+
+    if let Some(m) = power_of_two_base_exponent(base) {
+        let value_bits = value.bits();
+        let m_u64 = m as u64;
+        let k_floor_u64 = if value_bits <= 1 {
+            0u64
+        } else {
+            (value_bits - 1) / m_u64
+        };
+        if k_floor_u64 > u32::MAX as u64 {
+            bail!("exponent exceeds u32::MAX; base too small for this input");
+        }
+        let k_floor = k_floor_u64 as u32;
+        let shift_floor = m_u64.saturating_mul(k_floor_u64);
+        let power_floor = BigUint::from(1u8) << (shift_floor as usize);
+        let delta_floor = abs_diff(value, &power_floor);
+        let mut best = NearPowerResult {
+            exponent: k_floor,
+            power: power_floor,
+            delta: delta_floor,
+            exponents_checked: 1,
+            comparisons: 1,
+            fast_path: true,
+            power_of_two_m: Some(m),
+            k_floor: Some(k_floor),
+            shift_bits_used: shift_floor,
+        };
+
+        if k_floor < u32::MAX {
+            let k_hi = k_floor + 1;
+            let shift_hi = m_u64.saturating_mul(k_hi as u64);
+            let power_hi = BigUint::from(1u8) << (shift_hi as usize);
+            let delta_hi = abs_diff(value, &power_hi);
+            best.comparisons += 1;
+            best.exponents_checked += 1;
+            best.shift_bits_used = best.shift_bits_used.saturating_add(shift_hi);
+            if delta_hi < best.delta {
+                best = NearPowerResult {
+                    exponent: k_hi,
+                    power: power_hi,
+                    delta: delta_hi,
+                    exponents_checked: best.exponents_checked,
+                    comparisons: best.comparisons,
+                    fast_path: true,
+                    power_of_two_m: Some(m),
+                    k_floor: Some(k_floor),
+                    shift_bits_used: best.shift_bits_used,
+                };
+            }
+        }
+
+        return Ok(best);
     }
 
     let (floor, checked) = floor_log_biguint(base, value)?;
@@ -693,6 +784,11 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
         power: power_floor,
         delta: delta_floor,
         exponents_checked: checked,
+        comparisons: checked,
+        fast_path: false,
+        power_of_two_m: None,
+        k_floor: Some(floor),
+        shift_bits_used: 0,
     };
 
     if floor < u32::MAX {
@@ -711,6 +807,11 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
                 power: power_hi,
                 delta: delta_hi,
                 exponents_checked: best.exponents_checked,
+                comparisons: best.comparisons,
+                fast_path: false,
+                power_of_two_m: None,
+                k_floor: Some(floor),
+                shift_bits_used: 0,
             };
         }
     }
@@ -727,6 +828,9 @@ fn run_near_power_iterations(
     let mut total_power = BigUint::from(0u8);
     let mut total_delta = BigUint::from(0u8);
     let mut total_exponents_checked = 0u64;
+    let mut total_comparisons = 0u64;
+    let mut fast_path_used_count = 0u64;
+    let mut total_shift_bits = 0u64;
     let mut exponents = Vec::new();
 
     for idx in 1..=n_times {
@@ -739,11 +843,15 @@ fn run_near_power_iterations(
             iteration = idx,
             base_bits = base.bits(),
             value_bits = remaining.bits(),
+            fast_path = result.fast_path,
+            power_of_two_m = result.power_of_two_m,
+            k_floor = result.k_floor,
             exponent = result.exponent,
             power_bits = result.power.bits(),
             delta_bits = result.delta.bits(),
             delta_digits,
             exponents_checked = result.exponents_checked,
+            comparisons = result.comparisons,
             power_over,
             percent_delta = %percent_delta,
             power_percent = %power_percent,
@@ -753,6 +861,11 @@ fn run_near_power_iterations(
         total_power += &result.power;
         total_delta += &result.delta;
         total_exponents_checked += result.exponents_checked;
+        total_comparisons += result.comparisons;
+        if result.fast_path {
+            fast_path_used_count += 1;
+            total_shift_bits = total_shift_bits.saturating_add(result.shift_bits_used);
+        }
         exponents.push(result.exponent);
 
         if result.delta.is_zero() {
@@ -768,6 +881,9 @@ fn run_near_power_iterations(
         total_power,
         total_delta,
         total_exponents_checked,
+        total_comparisons,
+        fast_path_used_count,
+        total_shift_bits,
         final_delta: remaining,
     })
 }
