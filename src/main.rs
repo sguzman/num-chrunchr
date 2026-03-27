@@ -686,7 +686,6 @@ fn percent_delta_string(value: &BigUint, power: &BigUint) -> String {
         return "inf".to_string();
     }
 
-    let sign = if power >= value { "" } else { "-" };
     let delta = abs_diff(value, power);
     let scale = BigUint::from(1_000_000u64);
     let factor = BigUint::from(100_000_000u64);
@@ -694,7 +693,7 @@ fn percent_delta_string(value: &BigUint, power: &BigUint) -> String {
     let integer = &scaled / &scale;
     let frac = &scaled % &scale;
     let frac_u64 = frac.to_u64().unwrap_or(0);
-    format!("{sign}{}.{:06}%", integer.to_str_radix(10), frac_u64)
+    format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
 }
 
 fn floor_log_biguint(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
