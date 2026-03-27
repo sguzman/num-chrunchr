@@ -354,6 +354,10 @@ fn main() -> Result<()> {
             let coverage_percent = coverage_percent_string(&value, &iter_result.final_delta);
             let percent_delta = percent_delta_string(&value, &iter_result.final_delta);
             let exact_coverage = iter_result.final_delta.is_zero();
+            let total_delta_base10_digits = biguint_decimal_digits(&iter_result.total_delta);
+            let total_delta_base2_digits = iter_result.total_delta.bits().max(1);
+            let final_delta_base10_digits = biguint_decimal_digits(&iter_result.final_delta);
+            let final_delta_base2_digits = iter_result.final_delta.bits().max(1);
             info!(
                 base_bits = base.bits(),
                 value_bits = value.bits(),
@@ -366,9 +370,11 @@ fn main() -> Result<()> {
                 total_shift_bits = iter_result.total_shift_bits,
                 total_power_bits = iter_result.total_power.bits(),
                 total_delta_bits = iter_result.total_delta.bits(),
-                total_delta_digits = biguint_decimal_digits(&iter_result.total_delta),
+                total_delta_base10_digits,
+                total_delta_base2_digits,
                 final_delta_bits = iter_result.final_delta.bits(),
-                final_delta_digits = biguint_decimal_digits(&iter_result.final_delta),
+                final_delta_base10_digits,
+                final_delta_base2_digits,
                 coverage_percent = %coverage_percent,
                 percent_delta = %percent_delta,
                 exact_coverage,
@@ -865,7 +871,8 @@ fn run_near_power_iterations(
 
     for idx in 1..=n_times {
         let result = nearest_power_exponent(base, &remaining)?;
-        let delta_digits = biguint_decimal_digits(&result.delta);
+        let delta_base10_digits = biguint_decimal_digits(&result.delta);
+        let delta_base2_digits = result.delta.bits().max(1);
         let power_percent = percent_of_value_string(&remaining, &result.power);
         let percent_delta = percent_delta_string(&remaining, &result.delta);
         let cumulative_coverage_percent = coverage_percent_string(value, &result.delta);
@@ -880,7 +887,8 @@ fn run_near_power_iterations(
             exponent = result.exponent,
             power_bits = result.power.bits(),
             delta_bits = result.delta.bits(),
-            delta_digits,
+            delta_base10_digits,
+            delta_base2_digits,
             exponents_checked = result.exponents_checked,
             comparisons = result.comparisons,
             power_over,
