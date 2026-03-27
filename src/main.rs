@@ -101,6 +101,12 @@ enum Command {
         /// Inline decimal string for the base
         #[arg(long)]
         base_number: Option<String>,
+        /// Read --base-input as a raw binary integer (default is decimal digits)
+        #[arg(long, default_value_t = false)]
+        base_binary: bool,
+        /// Interpret raw binary base bytes as little-endian (default big-endian)
+        #[arg(long, default_value_t = false)]
+        base_little_endian: bool,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -314,6 +320,8 @@ fn main() -> Result<()> {
         Command::NearPower {
             base_input,
             base_number,
+            base_binary,
+            base_little_endian,
         } => {
             let source = source
                 .as_ref()
@@ -325,6 +333,8 @@ fn main() -> Result<()> {
                 base_input.as_ref(),
                 base_number.as_deref(),
                 config.stream.buffer_size,
+                base_binary,
+                base_little_endian,
             )?;
             let result = nearest_power_exponent(&base, &value)?;
             let delta_digits = biguint_decimal_digits(&result.delta);
@@ -339,6 +349,8 @@ fn main() -> Result<()> {
                 delta_bits = result.delta.bits(),
                 delta_digits,
                 exponents_checked = result.exponents_checked,
+                base_binary,
+                base_little_endian,
                 power_over,
                 power_percent = %power_percent,
                 "near-power command complete"
@@ -590,13 +602,32 @@ fn load_base_biguint(
     base_input: Option<&PathBuf>,
     base_number: Option<&str>,
     buffer_size: usize,
+    base_binary: bool,
+    base_little_endian: bool,
 ) -> Result<BigUint> {
+    if base_little_endian && !base_binary {
+        bail!("--base-little-endian is only valid with --base-binary");
+    }
     match (base_input, base_number) {
         (Some(path), None) => {
-            load_biguint_from_input(path, buffer_size, NumberEncoding::Decimal)
+            let encoding = if base_binary {
+                if base_little_endian {
+                    NumberEncoding::BinaryLittleEndian
+                } else {
+                    NumberEncoding::BinaryBigEndian
+                }
+            } else {
+                NumberEncoding::Decimal
+            };
+            load_biguint_from_input(path, buffer_size, encoding)
                 .with_context(|| format!("failed to load base from {}", path.display()))
         }
-        (None, Some(text)) => parse_decimal_biguint(text),
+        (None, Some(text)) => {
+            if base_binary {
+                bail!("--base-binary requires --base-input");
+            }
+            parse_decimal_biguint(text)
+        }
         (Some(_), Some(_)) => bail!("use either --base-input or --base-number"),
         (None, None) => bail!("provide --base-input or --base-number"),
     }
@@ -1605,9 +1636,41 @@ mod tests {
             Command::NearPower {
                 base_input,
                 base_number,
+                base_binary,
+                base_little_endian,
             } => {
                 assert!(base_input.is_none());
                 assert_eq!(base_number, Some("10".to_string()));
+                assert!(!base_binary);
+                assert!(!base_little_endian);
+            }
+            _ => panic!("expected near-power command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_near_power_base_binary() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "12345",
+            "near-power",
+            "--base-input",
+            "base.bin",
+            "--base-binary",
+            "--base-little-endian",
+        ]);
+        match cli.cmd {
+            Command::NearPower {
+                base_input,
+                base_number,
+                base_binary,
+                base_little_endian,
+            } => {
+                assert_eq!(base_input, Some(PathBuf::from("base.bin")));
+                assert!(base_number.is_none());
+                assert!(base_binary);
+                assert!(base_little_endian);
             }
             _ => panic!("expected near-power command"),
         }
@@ -1769,6 +1832,66 @@ mod tests {
         let source = cli.number_source().unwrap();
         let err = cli.encoding(source.as_ref()).unwrap_err();
         assert!(err.to_string().contains("--binary requires --input"));
+    }
+
+    #[test]
+    fn near_power_rejects_base_little_endian_without_binary() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "360",
+            "near-power",
+            "--base-input",
+            "base.bin",
+            "--base-little-endian",
+        ]);
+        let err = match cli.cmd {
+            Command::NearPower {
+                base_input,
+                base_number,
+                base_binary,
+                base_little_endian,
+            } => load_base_biguint(
+                base_input.as_ref(),
+                base_number.as_deref(),
+                1024,
+                base_binary,
+                base_little_endian,
+            )
+            .unwrap_err(),
+            _ => panic!("expected near-power command"),
+        };
+        assert!(err.to_string().contains("--base-little-endian"));
+    }
+
+    #[test]
+    fn near_power_rejects_base_binary_without_input() {
+        let cli = Cli::parse_from([
+            "num-chrunchr",
+            "--number",
+            "360",
+            "near-power",
+            "--base-number",
+            "2",
+            "--base-binary",
+        ]);
+        let err = match cli.cmd {
+            Command::NearPower {
+                base_input,
+                base_number,
+                base_binary,
+                base_little_endian,
+            } => load_base_biguint(
+                base_input.as_ref(),
+                base_number.as_deref(),
+                1024,
+                base_binary,
+                base_little_endian,
+            )
+            .unwrap_err(),
+            _ => panic!("expected near-power command"),
+        };
+        assert!(err.to_string().contains("--base-binary requires --base-input"));
     }
 
     #[test]
