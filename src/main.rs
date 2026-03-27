@@ -119,6 +119,9 @@ enum Command {
         /// Compression scheme to optimize deltas
         #[arg(long, value_enum, default_value_t = CompressionScheme::MinTotalAbs)]
         compress_scheme: CompressionScheme,
+        /// Disallow overshooting the target (force power <= target)
+        #[arg(long, default_value_t = false)]
+        no_overshoot: bool,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -338,6 +341,7 @@ fn main() -> Result<()> {
             compress_seq_a,
             compress_seq_b,
             compress_scheme,
+            no_overshoot,
         } => {
             let source = source
                 .as_ref()
@@ -355,7 +359,7 @@ fn main() -> Result<()> {
             if n_times == 0 {
                 bail!("--n-times must be >= 1");
             }
-            let iter_result = run_near_power_iterations(&base, &value, n_times)?;
+            let iter_result = run_near_power_iterations(&base, &value, n_times, no_overshoot)?;
             let exponent_list = iter_result
                 .exponents
                 .iter()
@@ -757,7 +761,11 @@ fn power_of_two_base_exponent(base: &BigUint) -> Option<u32> {
     None
 }
 
-fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerResult> {
+fn nearest_power_exponent(
+    base: &BigUint,
+    value: &BigUint,
+    no_overshoot: bool,
+) -> Result<NearPowerResult> {
     let two = BigUint::from(2u8);
     if base < &two {
         bail!("base must be >= 2");
@@ -820,6 +828,9 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
                 return Ok(best);
             }
             let power_hi = BigUint::from(1u8) << (shift_hi as usize);
+            if no_overshoot && power_hi > *value {
+                return Ok(best);
+            }
             let (delta_hi, delta_hi_exact) = abs_diff_counted(value, &power_hi);
             best.comparisons += 1;
             best.exponents_checked += 1;
@@ -873,6 +884,9 @@ fn nearest_power_exponent(base: &BigUint, value: &BigUint) -> Result<NearPowerRe
     if floor < u32::MAX {
         let hi = floor + 1;
         let power_hi = base.pow(hi);
+        if no_overshoot && power_hi > *value {
+            return Ok(best);
+        }
         let (delta_hi, delta_hi_exact) = abs_diff_counted(value, &power_hi);
         best.exponents_checked += 1;
         best.comparisons += 1;
@@ -907,6 +921,7 @@ fn run_near_power_iterations(
     base: &BigUint,
     value: &BigUint,
     n_times: u32,
+    no_overshoot: bool,
 ) -> Result<NearPowerIterations> {
     let mut remaining = value.clone();
     let mut total_power = BigUint::from(0u8);
@@ -918,7 +933,7 @@ fn run_near_power_iterations(
     let mut exponents = Vec::new();
 
     for idx in 1..=n_times {
-        let result = nearest_power_exponent(base, &remaining)?;
+        let result = nearest_power_exponent(base, &remaining, no_overshoot)?;
         let delta_base10_digits = biguint_decimal_digits(&result.delta);
         let delta_base2_digits = result.delta.bits().max(1);
         let power_percent = percent_of_value_string(&remaining, &result.power);
@@ -2158,6 +2173,7 @@ mod tests {
                 compress_seq_a,
                 compress_seq_b,
                 compress_scheme,
+                no_overshoot,
             } => {
                 assert!(base_input.is_none());
                 assert_eq!(base_number, Some("10".to_string()));
@@ -2167,6 +2183,7 @@ mod tests {
                 assert!(compress_seq_a);
                 assert!(!compress_seq_b);
                 assert_eq!(compress_scheme, CompressionScheme::MinTotalAbs);
+                assert!(!no_overshoot);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2194,6 +2211,7 @@ mod tests {
                 compress_seq_a,
                 compress_seq_b,
                 compress_scheme,
+                no_overshoot,
             } => {
                 assert_eq!(base_input, Some(PathBuf::from("base.bin")));
                 assert!(base_number.is_none());
@@ -2203,6 +2221,7 @@ mod tests {
                 assert!(!compress_seq_a);
                 assert!(!compress_seq_b);
                 assert_eq!(compress_scheme, CompressionScheme::MinTotalAbs);
+                assert!(!no_overshoot);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2212,7 +2231,7 @@ mod tests {
     fn nearest_power_prefers_lower_on_tie() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(6u8);
-        let result = nearest_power_exponent(&base, &value).unwrap();
+        let result = nearest_power_exponent(&base, &value, false).unwrap();
         assert_eq!(result.exponent, 2);
     }
 
@@ -2220,7 +2239,7 @@ mod tests {
     fn nearest_power_selects_closer_exponent() {
         let base = BigUint::from(10u8);
         let value = BigUint::from(900u16);
-        let result = nearest_power_exponent(&base, &value).unwrap();
+        let result = nearest_power_exponent(&base, &value, false).unwrap();
         assert_eq!(result.exponent, 3);
     }
 
@@ -2228,7 +2247,7 @@ mod tests {
     fn near_power_iterations_stop_on_exact_match() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(6u8);
-        let result = run_near_power_iterations(&base, &value, 5).unwrap();
+        let result = run_near_power_iterations(&base, &value, 5, false).unwrap();
         assert_eq!(result.exponents, vec![2, 1]);
         assert_eq!(result.iterations, 2);
         assert_eq!(result.total_power, BigUint::from(6u8));
@@ -2239,7 +2258,7 @@ mod tests {
     fn power_of_two_fast_path_matches_pow_for_small_cases() {
         let base = BigUint::from(8u8);
         let value = BigUint::from(500u16);
-        let result = nearest_power_exponent(&base, &value).unwrap();
+        let result = nearest_power_exponent(&base, &value, false).unwrap();
         let rebuilt = base.pow(result.exponent);
         assert_eq!(rebuilt, result.power);
         assert!(result.fast_path);
@@ -2250,7 +2269,7 @@ mod tests {
     fn near_power_iterations_match_top_bits_for_base_two() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(44u8); // 0b101100
-        let result = run_near_power_iterations(&base, &value, 5).unwrap();
+        let result = run_near_power_iterations(&base, &value, 5, false).unwrap();
         assert_eq!(result.exponents, vec![5, 3, 2]);
         assert_eq!(result.iterations, 3);
         assert_eq!(result.final_delta, BigUint::from(0u8));
@@ -2260,7 +2279,7 @@ mod tests {
     fn nearest_power_zero_returns_exponent_zero() {
         let base = BigUint::from(2u8);
         let value = BigUint::from(0u8);
-        let result = nearest_power_exponent(&base, &value).unwrap();
+        let result = nearest_power_exponent(&base, &value, false).unwrap();
         assert_eq!(result.exponent, 0);
         assert_eq!(result.delta, BigUint::from(1u8));
     }
@@ -2269,9 +2288,18 @@ mod tests {
     fn near_power_iterations_zero_value_stops_immediately() {
         let base = BigUint::from(4u8);
         let value = BigUint::from(0u8);
-        let result = run_near_power_iterations(&base, &value, 5).unwrap();
+        let result = run_near_power_iterations(&base, &value, 5, false).unwrap();
         assert_eq!(result.iterations, 1);
         assert_eq!(result.final_delta, BigUint::from(1u8));
+    }
+
+    #[test]
+    fn no_overshoot_keeps_power_under_target() {
+        let base = BigUint::from(2u8);
+        let value = BigUint::from(6u8);
+        let result = nearest_power_exponent(&base, &value, true).unwrap();
+        assert_eq!(result.exponent, 2);
+        assert!(result.power <= value);
     }
 
     #[test]
