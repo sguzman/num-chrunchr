@@ -2299,6 +2299,23 @@ mod tests {
     }
 
     #[test]
+    fn format_i128_list_outputs_csv() {
+        let values = vec![1i128, -2, 30];
+        assert_eq!(format_i128_list(&values), "1,-2,30");
+    }
+
+    #[test]
+    fn compression_output_fields_are_consistent() {
+        let exps = vec![10u32, 20, 30];
+        let result = compress_sequence_a(&exps, CompressionScheme::MinTotalAbs);
+        assert_eq!(result.base, 20);
+        assert_eq!(result.deltas, vec![-10, 0, 10]);
+        assert_eq!(result.max_abs_delta, 10);
+        assert_eq!(result.total_abs_delta, 20);
+        assert!(result.total_digit_count > 0);
+    }
+
+    #[test]
     fn cli_parses_estimate_any_factor_digits_only() {
         let cli = Cli::parse_from([
             "num-chrunchr",

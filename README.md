@@ -79,6 +79,30 @@ Different representations excel at different operations:
   - Limited: RAM size
 
 - **ExprAst** (planned)
+
+---
+
+## Near-power sequence compression
+
+After running `near-power`, you can optionally compress the exponent sequence:
+
+- `--compress-seqA`: choose a base `B` and store deltas `e_i - B`.
+- `--compress-seqB`: store `e_0` and deltas `e_i - e_{i-1}`.
+
+Select the optimization scheme with `--compress-scheme`:
+
+- `min-max-abs`
+- `min-total-abs` (default)
+- `min-digit-count`
+- `min-bit-count`
+- `min-varint-size`
+
+Example:
+
+```
+num-chrunchr --input big.bin --binary near-power --base-number 2 --n-times 5 \
+  --compress-seqA --compress-scheme min-total-abs
+```
   - Great: numbers like `a^b +/- c`, products, factorial-like forms, sparse sums
   - Allows: fast `mod p` without expansion via modular exponentiation
   - Enables: algebraic factor rules

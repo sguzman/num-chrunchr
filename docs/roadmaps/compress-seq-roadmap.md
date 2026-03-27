@@ -57,8 +57,8 @@
 ## Tests
 - [x] Unit tests for seqA base selection under each scheme.
 - [x] Unit tests for seqB deltas and scheme behavior.
-- [ ] Golden output tests for small known sequences.
+- [x] Golden output tests for small known sequences.
 
 ## Docs
-- [ ] Update README with new flags.
-- [ ] Add a short doc describing seqA vs seqB and schemes.
+- [x] Update README with new flags.
+- [x] Add a short doc describing seqA vs seqB and schemes.
