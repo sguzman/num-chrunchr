@@ -11,6 +11,7 @@ use gpu::batch_mod::{BatchModEngine, SymbolOrder};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 use repr::{BigIntRam, DecimalStream};
+use serde::{Deserialize, Serialize};
 use source::NumberSource;
 use std::{
     cmp::Ordering,
@@ -18,7 +19,7 @@ use std::{
     fs::File,
     io::{BufReader, Read, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -124,6 +125,14 @@ enum Command {
         /// Disable log-estimate fast path for non-power-of-2 bases
         #[arg(long, default_value_t = false)]
         no_log_estimate: bool,
+        /// Cache computed exponents under .cache/num-chrunchr
+        #[arg(long, default_value_t = false)]
+        cache: bool,
+    },
+    /// Work with cached near-power results
+    Cache {
+        #[command(subcommand)]
+        action: CacheCommand,
     },
     /// Convert raw binary input bytes to decimal text output
     WriteDecimal {
@@ -346,13 +355,11 @@ fn main() -> Result<()> {
             no_overshoot,
             prime_rounds,
             no_log_estimate,
+            cache,
         } => {
             let source = source
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("provide --input or --number"))?;
-            let prepared = source.prepare()?;
-            let value =
-                load_biguint_from_input(&prepared.path, config.stream.buffer_size, encoding)?;
             if prime_rounds {
                 if base_input.is_some() || base_number.is_some() {
                     bail!("--prime-rounds cannot be combined with --base-input/--base-number");
@@ -366,33 +373,206 @@ fn main() -> Result<()> {
             if n_times == 0 {
                 bail!("--n-times must be >= 1");
             }
-            let iter_result = if prime_rounds {
-                let primes = first_n_primes(n_times as usize);
-                let bases: Vec<BigUint> = primes.iter().map(|&p| BigUint::from(p)).collect();
-                run_near_power_iterations_with_bases(
-                    &bases,
-                    &value,
-                    no_overshoot,
-                    no_log_estimate,
-                )?
-            } else {
-                let base = load_base_biguint(
+            let cache_context = if cache {
+                Some(build_near_power_cache_context(
+                    source,
+                    encoding,
                     base_input.as_ref(),
                     base_number.as_deref(),
-                    config.stream.buffer_size,
                     base_binary,
                     base_little_endian,
-                )?;
-                run_near_power_iterations(
-                    &base,
-                    &value,
                     n_times,
                     no_overshoot,
+                    prime_rounds,
                     no_log_estimate,
-                )?
+                )?)
+            } else {
+                None
             };
-            let exponent_list = iter_result
-                .exponents
+            let cached_entry = if let Some(ctx) = cache_context.as_ref() {
+                match load_cache_entry(&ctx.entry_path) {
+                    Ok(entry) => {
+                        if cache_entry_matches(&entry, ctx) {
+                            Some(entry)
+                        } else {
+                            warn!(
+                                cache_path = %ctx.entry_path.display(),
+                                "cache entry does not match current input"
+                            );
+                            None
+                        }
+                    }
+                    Err(err) => {
+                        if ctx.entry_path.exists() {
+                            warn!(
+                                cache_path = %ctx.entry_path.display(),
+                                error = %err,
+                                "failed to read cache entry"
+                            );
+                        }
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let (exponents, aggregate) = if let Some(entry) = cached_entry {
+                info!(
+                    cache_path = %cache_context.as_ref().unwrap().entry_path.display(),
+                    cached_exponents = entry.exponents.len(),
+                    "near-power cache hit"
+                );
+                (entry.exponents, Some(entry.aggregate))
+            } else {
+                if cache {
+                    info!(
+                        cache_path = %cache_context.as_ref().unwrap().entry_path.display(),
+                        "near-power cache miss"
+                    );
+                }
+                let prepared = source.prepare()?;
+                let value =
+                    load_biguint_from_input(&prepared.path, config.stream.buffer_size, encoding)?;
+                let iter_result = if prime_rounds {
+                    let primes = first_n_primes(n_times as usize);
+                    let bases: Vec<BigUint> =
+                        primes.iter().map(|&p| BigUint::from(p)).collect();
+                    run_near_power_iterations_with_bases(
+                        &bases,
+                        &value,
+                        no_overshoot,
+                        no_log_estimate,
+                    )?
+                } else {
+                    let base = load_base_biguint(
+                        base_input.as_ref(),
+                        base_number.as_deref(),
+                        config.stream.buffer_size,
+                        base_binary,
+                        base_little_endian,
+                    )?;
+                    run_near_power_iterations(
+                        &base,
+                        &value,
+                        n_times,
+                        no_overshoot,
+                        no_log_estimate,
+                    )?
+                };
+                let coverage_percent = coverage_percent_string(&value, &iter_result.final_delta);
+                let percent_delta = percent_delta_string(&value, &iter_result.final_delta);
+                let exact_coverage = iter_result.final_delta.is_zero();
+                let total_delta_base10_digits = biguint_decimal_digits(&iter_result.total_delta);
+                let total_delta_base2_digits = iter_result.total_delta.bits().max(1);
+                let final_delta_base10_digits = biguint_decimal_digits(&iter_result.final_delta);
+                let final_delta_base2_digits = iter_result.final_delta.bits().max(1);
+                let base_mode = if prime_rounds { "prime_rounds" } else { "fixed_base" };
+                let base_bits = if prime_rounds { None } else { Some(iter_result.base_bits) };
+                let (estimate_bytes, estimate_bytes_human) =
+                    bytes_from_bits_stats(iter_result.total_power.bits());
+                let (value_bytes, value_bytes_human) = bytes_from_bits_stats(value.bits());
+                let (delta_bytes, delta_bytes_human) =
+                    bytes_from_bits_stats(iter_result.final_delta.bits());
+                let approx_value = if iter_result.final_delta <= value {
+                    value.clone() - &iter_result.final_delta
+                } else {
+                    BigUint::from(0u8)
+                };
+                let (approx_bytes, approx_bytes_human) =
+                    bytes_from_bits_stats(approx_value.bits());
+                info!(
+                    base_bits = ?base_bits,
+                    base_mode,
+                    base_sequence = ?iter_result.base_sequence,
+                    value_bits = value.bits(),
+                    base_binary,
+                    base_little_endian,
+                    iterations = iter_result.iterations,
+                    total_exponents_checked = iter_result.total_exponents_checked,
+                    total_comparisons = iter_result.total_comparisons,
+                    fast_path_used_count = iter_result.fast_path_used_count,
+                    total_shift_bits = iter_result.total_shift_bits,
+                    total_power_bits = iter_result.total_power.bits(),
+                    total_delta_bits = iter_result.total_delta.bits(),
+                    total_delta_base10_digits,
+                    total_delta_base2_digits,
+                    final_delta_bits = iter_result.final_delta.bits(),
+                    final_delta_base10_digits,
+                    final_delta_base2_digits,
+                    coverage_percent = %coverage_percent,
+                    percent_delta = %percent_delta,
+                    exact_coverage,
+                    estimate_bytes,
+                    estimate_bytes_human = %estimate_bytes_human,
+                    value_bytes,
+                    value_bytes_human = %value_bytes_human,
+                    delta_bytes,
+                    delta_bytes_human = %delta_bytes_human,
+                    approx_bytes,
+                    approx_bytes_human = %approx_bytes_human,
+                    cache_hit = false,
+                    "near-power aggregate complete"
+                );
+                let aggregate = CacheAggregate {
+                    base_bits,
+                    base_mode: base_mode.to_string(),
+                    base_sequence: iter_result.base_sequence.clone(),
+                    value_bits: value.bits(),
+                    base_binary,
+                    base_little_endian,
+                    iterations: iter_result.iterations,
+                    total_exponents_checked: iter_result.total_exponents_checked,
+                    total_comparisons: iter_result.total_comparisons,
+                    fast_path_used_count: iter_result.fast_path_used_count,
+                    total_shift_bits: iter_result.total_shift_bits,
+                    total_power_bits: iter_result.total_power.bits(),
+                    total_delta_bits: iter_result.total_delta.bits(),
+                    total_delta_base10_digits,
+                    total_delta_base2_digits,
+                    final_delta_bits: iter_result.final_delta.bits(),
+                    final_delta_base10_digits,
+                    final_delta_base2_digits,
+                    coverage_percent,
+                    percent_delta,
+                    exact_coverage,
+                    estimate_bytes,
+                    estimate_bytes_human,
+                    value_bytes,
+                    value_bytes_human,
+                    delta_bytes,
+                    delta_bytes_human,
+                    approx_bytes,
+                    approx_bytes_human,
+                };
+                if let Some(ctx) = cache_context.as_ref() {
+                    let entry = NearPowerCacheEntry {
+                        schema_version: CACHE_SCHEMA_VERSION,
+                        created_unix_ms: unix_ms(),
+                        target: ctx.target.clone(),
+                        base: ctx.base.clone(),
+                        settings: ctx.settings.clone(),
+                        target_hash: ctx.target_hash.clone(),
+                        base_hash: ctx.base_hash.clone(),
+                        settings_hash: ctx.settings_hash.clone(),
+                        exponents: iter_result.exponents.clone(),
+                        aggregate: aggregate.clone(),
+                    };
+                    if let Err(err) = store_cache_entry(ctx, &entry) {
+                        warn!(
+                            cache_path = %ctx.entry_path.display(),
+                            error = %err,
+                            "failed to write near-power cache entry"
+                        );
+                    } else {
+                        info!(
+                            cache_path = %ctx.entry_path.display(),
+                            "near-power cache stored"
+                        );
+                    }
+                }
+                (iter_result.exponents, None)
+            };
+            let exponent_list = exponents
                 .iter()
                 .map(|exp| exp.to_string())
                 .collect::<Vec<_>>()
@@ -400,9 +580,9 @@ fn main() -> Result<()> {
             println!("{exponent_list}"); // keep stdout simple but informative
             if compress_seq_a || compress_seq_b {
                 let compression = if compress_seq_a {
-                    compress_sequence_a(&iter_result.exponents, compress_scheme)
+                    compress_sequence_a(&exponents, compress_scheme)
                 } else {
-                    compress_sequence_b(&iter_result.exponents, compress_scheme)
+                    compress_sequence_b(&exponents, compress_scheme)
                 };
                 let mode_label = if compress_seq_a { "seqA" } else { "seqB" };
                 let delta_list = format_i128_list(&compression.deltas);
@@ -425,59 +605,12 @@ fn main() -> Result<()> {
                     "near-power compression complete"
                 );
             }
-            let coverage_percent = coverage_percent_string(&value, &iter_result.final_delta);
-            let percent_delta = percent_delta_string(&value, &iter_result.final_delta);
-            let exact_coverage = iter_result.final_delta.is_zero();
-            let total_delta_base10_digits = biguint_decimal_digits(&iter_result.total_delta);
-            let total_delta_base2_digits = iter_result.total_delta.bits().max(1);
-            let final_delta_base10_digits = biguint_decimal_digits(&iter_result.final_delta);
-            let final_delta_base2_digits = iter_result.final_delta.bits().max(1);
-            let base_mode = if prime_rounds { "prime_rounds" } else { "fixed_base" };
-            let base_bits = if prime_rounds { None } else { Some(iter_result.base_bits) };
-            let (estimate_bytes, estimate_bytes_human) =
-                bytes_from_bits_stats(iter_result.total_power.bits());
-            let (value_bytes, value_bytes_human) = bytes_from_bits_stats(value.bits());
-            let (delta_bytes, delta_bytes_human) =
-                bytes_from_bits_stats(iter_result.final_delta.bits());
-            let approx_value = if iter_result.final_delta <= value {
-                value.clone() - &iter_result.final_delta
-            } else {
-                BigUint::from(0u8)
-            };
-            let (approx_bytes, approx_bytes_human) =
-                bytes_from_bits_stats(approx_value.bits());
-            info!(
-                base_bits = ?base_bits,
-                base_mode,
-                base_sequence = ?iter_result.base_sequence,
-                value_bits = value.bits(),
-                base_binary,
-                base_little_endian,
-                iterations = iter_result.iterations,
-                total_exponents_checked = iter_result.total_exponents_checked,
-                total_comparisons = iter_result.total_comparisons,
-                fast_path_used_count = iter_result.fast_path_used_count,
-                total_shift_bits = iter_result.total_shift_bits,
-                total_power_bits = iter_result.total_power.bits(),
-                total_delta_bits = iter_result.total_delta.bits(),
-                total_delta_base10_digits,
-                total_delta_base2_digits,
-                final_delta_bits = iter_result.final_delta.bits(),
-                final_delta_base10_digits,
-                final_delta_base2_digits,
-                coverage_percent = %coverage_percent,
-                percent_delta = %percent_delta,
-                exact_coverage,
-                estimate_bytes,
-                estimate_bytes_human = %estimate_bytes_human,
-                value_bytes,
-                value_bytes_human = %value_bytes_human,
-                delta_bytes,
-                delta_bytes_human = %delta_bytes_human,
-                approx_bytes,
-                approx_bytes_human = %approx_bytes_human,
-                "near-power aggregate complete"
-            );
+            if let Some(aggregate) = aggregate {
+                log_cached_aggregate(&aggregate);
+            }
+        }
+        Command::Cache { action } => {
+            handle_cache_command(action)?;
         }
         Command::WriteDecimal { out } => {
             let source = source
@@ -1654,6 +1787,105 @@ enum EstimateMode {
     Unknown,
 }
 
+#[derive(Subcommand, Debug)]
+enum CacheCommand {
+    /// List cached entries
+    List,
+    /// Purge all cached entries (requires --confirm)
+    Purge {
+        #[arg(long, default_value_t = false)]
+        confirm: bool,
+    },
+}
+
+const CACHE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CacheSettings {
+    n_times: u32,
+    no_overshoot: bool,
+    no_log_estimate: bool,
+    prime_rounds: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CacheNumberDescriptor {
+    kind: String,
+    label: String,
+    path: Option<String>,
+    size_bytes: Option<u64>,
+    modified_unix_ms: Option<u128>,
+    inline_preview: Option<String>,
+    inline_hash: Option<String>,
+    binary: bool,
+    little_endian: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CacheBaseDescriptor {
+    mode: String,
+    source: Option<CacheNumberDescriptor>,
+    base_binary: bool,
+    base_little_endian: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CacheAggregate {
+    base_bits: Option<u64>,
+    base_mode: String,
+    base_sequence: Option<Vec<u64>>,
+    value_bits: u64,
+    base_binary: bool,
+    base_little_endian: bool,
+    iterations: u32,
+    total_exponents_checked: u64,
+    total_comparisons: u64,
+    fast_path_used_count: u64,
+    total_shift_bits: u64,
+    total_power_bits: u64,
+    total_delta_bits: u64,
+    total_delta_base10_digits: u64,
+    total_delta_base2_digits: u64,
+    final_delta_bits: u64,
+    final_delta_base10_digits: u64,
+    final_delta_base2_digits: u64,
+    coverage_percent: String,
+    percent_delta: String,
+    exact_coverage: bool,
+    estimate_bytes: u64,
+    estimate_bytes_human: String,
+    value_bytes: u64,
+    value_bytes_human: String,
+    delta_bytes: u64,
+    delta_bytes_human: String,
+    approx_bytes: u64,
+    approx_bytes_human: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NearPowerCacheEntry {
+    schema_version: u32,
+    created_unix_ms: u128,
+    target: CacheNumberDescriptor,
+    base: CacheBaseDescriptor,
+    settings: CacheSettings,
+    target_hash: String,
+    base_hash: String,
+    settings_hash: String,
+    exponents: Vec<u64>,
+    aggregate: CacheAggregate,
+}
+
+struct NearPowerCacheContext {
+    entry_path: PathBuf,
+    target: CacheNumberDescriptor,
+    base: CacheBaseDescriptor,
+    settings: CacheSettings,
+    target_hash: String,
+    base_hash: String,
+    settings_hash: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 enum CompressionScheme {
     MinMaxAbs,
@@ -1661,6 +1893,329 @@ enum CompressionScheme {
     MinDigitCount,
     MinBitCount,
     MinVarintSize,
+}
+
+fn handle_cache_command(action: CacheCommand) -> Result<()> {
+    match action {
+        CacheCommand::List => {
+            let entries = load_cache_entries()?;
+            if entries.is_empty() {
+                println!("cache is empty");
+                return Ok(());
+            }
+            for entry in entries {
+                println!("{}", format_cache_entry(&entry));
+            }
+        }
+        CacheCommand::Purge { confirm } => {
+            if !confirm {
+                bail!("refusing to purge cache without --confirm");
+            }
+            let root = cache_root();
+            if root.exists() {
+                fs::remove_dir_all(&root)
+                    .with_context(|| format!("failed to remove {}", root.display()))?;
+                info!(cache_root = %root.display(), "cache purged");
+            } else {
+                info!(cache_root = %root.display(), "cache already empty");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_cache_entries() -> Result<Vec<NearPowerCacheEntry>> {
+    let root = cache_root();
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("failed to read {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            match load_cache_entry(&path) {
+                Ok(entry) => entries.push(entry),
+                Err(err) => warn!(
+                    cache_path = %path.display(),
+                    error = %err,
+                    "failed to read cache entry"
+                ),
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn format_cache_entry(entry: &NearPowerCacheEntry) -> String {
+    let base_label = if entry.base.mode == "prime_rounds" {
+        "prime_rounds".to_string()
+    } else {
+        entry
+            .base
+            .source
+            .as_ref()
+            .map(|src| src.label.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    format!(
+        "target={} base={} n_times={} prime_rounds={} no_overshoot={} no_log_estimate={} exponents={} created_unix_ms={}",
+        entry.target.label,
+        base_label,
+        entry.settings.n_times,
+        entry.settings.prime_rounds,
+        entry.settings.no_overshoot,
+        entry.settings.no_log_estimate,
+        entry.exponents.len(),
+        entry.created_unix_ms
+    )
+}
+
+fn build_near_power_cache_context(
+    source: &NumberSource,
+    encoding: NumberEncoding,
+    base_input: Option<&PathBuf>,
+    base_number: Option<&str>,
+    base_binary: bool,
+    base_little_endian: bool,
+    n_times: u32,
+    no_overshoot: bool,
+    prime_rounds: bool,
+    no_log_estimate: bool,
+) -> Result<NearPowerCacheContext> {
+    let (binary, little_endian) = encoding_flags(encoding);
+    let target = descriptor_from_source(source, binary, little_endian)?;
+    let base = if prime_rounds {
+        CacheBaseDescriptor {
+            mode: "prime_rounds".to_string(),
+            source: None,
+            base_binary: false,
+            base_little_endian: false,
+        }
+    } else {
+        let base_source = base_descriptor_from_input(
+            base_input,
+            base_number,
+            base_binary,
+            base_little_endian,
+        )?;
+        CacheBaseDescriptor {
+            mode: "fixed_base".to_string(),
+            source: Some(base_source),
+            base_binary,
+            base_little_endian,
+        }
+    };
+    let settings = CacheSettings {
+        n_times,
+        no_overshoot,
+        no_log_estimate,
+        prime_rounds,
+    };
+    let target_hash = hash_value(&target)?;
+    let base_hash = hash_value(&base)?;
+    let settings_hash = hash_value(&settings)?;
+    let entry_path = cache_entry_path(&target_hash, &base_hash, &settings_hash);
+    Ok(NearPowerCacheContext {
+        entry_path,
+        target,
+        base,
+        settings,
+        target_hash,
+        base_hash,
+        settings_hash,
+    })
+}
+
+fn cache_entry_matches(entry: &NearPowerCacheEntry, ctx: &NearPowerCacheContext) -> bool {
+    entry.schema_version == CACHE_SCHEMA_VERSION
+        && entry.target == ctx.target
+        && entry.base == ctx.base
+        && entry.settings == ctx.settings
+        && entry.target_hash == ctx.target_hash
+        && entry.base_hash == ctx.base_hash
+        && entry.settings_hash == ctx.settings_hash
+}
+
+fn cache_root() -> PathBuf {
+    PathBuf::from(".cache/num-chrunchr")
+}
+
+fn cache_entry_path(target_hash: &str, base_hash: &str, settings_hash: &str) -> PathBuf {
+    cache_root()
+        .join(target_hash)
+        .join(base_hash)
+        .join(format!("{settings_hash}.json"))
+}
+
+fn store_cache_entry(ctx: &NearPowerCacheContext, entry: &NearPowerCacheEntry) -> Result<()> {
+    if let Some(parent) = ctx.entry_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let file = File::create(&ctx.entry_path)
+        .with_context(|| format!("failed to create {}", ctx.entry_path.display()))?;
+    serde_json::to_writer_pretty(file, entry)
+        .context("failed to serialize cache entry")?;
+    Ok(())
+}
+
+fn load_cache_entry(path: &Path) -> Result<NearPowerCacheEntry> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let entry = serde_json::from_reader(file).context("failed to deserialize cache entry")?;
+    Ok(entry)
+}
+
+fn unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn encoding_flags(encoding: NumberEncoding) -> (bool, bool) {
+    match encoding {
+        NumberEncoding::Decimal => (false, false),
+        NumberEncoding::BinaryBigEndian => (true, false),
+        NumberEncoding::BinaryLittleEndian => (true, true),
+    }
+}
+
+fn descriptor_from_source(
+    source: &NumberSource,
+    binary: bool,
+    little_endian: bool,
+) -> Result<CacheNumberDescriptor> {
+    match source {
+        NumberSource::File(path) => descriptor_from_path(path, binary, little_endian),
+        NumberSource::Inline(text) => Ok(descriptor_from_inline(text, binary, little_endian)),
+    }
+}
+
+fn base_descriptor_from_input(
+    base_input: Option<&PathBuf>,
+    base_number: Option<&str>,
+    base_binary: bool,
+    base_little_endian: bool,
+) -> Result<CacheNumberDescriptor> {
+    match (base_input, base_number) {
+        (Some(path), None) => descriptor_from_path(path, base_binary, base_little_endian),
+        (None, Some(text)) => {
+            if base_binary {
+                bail!("--base-binary requires --base-input");
+            }
+            if base_little_endian {
+                bail!("--base-little-endian requires --base-binary");
+            }
+            Ok(descriptor_from_inline(text, base_binary, base_little_endian))
+        }
+        (Some(_), Some(_)) => bail!("cannot use --base-input and --base-number together"),
+        (None, None) => bail!("provide --base-input or --base-number"),
+    }
+}
+
+fn descriptor_from_path(
+    path: &Path,
+    binary: bool,
+    little_endian: bool,
+) -> Result<CacheNumberDescriptor> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to stat {}", path.display()))?;
+    let modified_unix_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis());
+    Ok(CacheNumberDescriptor {
+        kind: "file".to_string(),
+        label: format!("file:{}", path.display()),
+        path: Some(path.to_string_lossy().to_string()),
+        size_bytes: Some(metadata.len()),
+        modified_unix_ms,
+        inline_preview: None,
+        inline_hash: None,
+        binary,
+        little_endian,
+    })
+}
+
+fn descriptor_from_inline(
+    text: &str,
+    binary: bool,
+    little_endian: bool,
+) -> CacheNumberDescriptor {
+    let preview: String = text.chars().take(24).collect();
+    CacheNumberDescriptor {
+        kind: "inline".to_string(),
+        label: format!("inline:{}...", preview),
+        path: None,
+        size_bytes: None,
+        modified_unix_ms: None,
+        inline_preview: Some(preview),
+        inline_hash: Some(hash_bytes(text.as_bytes())),
+        binary,
+        little_endian,
+    }
+}
+
+fn hash_value<T: Serialize>(value: &T) -> Result<String> {
+    let encoded = serde_json::to_string(value).context("failed to serialize cache key")?;
+    Ok(hash_bytes(encoded.as_bytes()))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", hash)
+}
+
+fn log_cached_aggregate(aggregate: &CacheAggregate) {
+    info!(
+        base_bits = ?aggregate.base_bits,
+        base_mode = aggregate.base_mode,
+        base_sequence = ?aggregate.base_sequence,
+        value_bits = aggregate.value_bits,
+        base_binary = aggregate.base_binary,
+        base_little_endian = aggregate.base_little_endian,
+        iterations = aggregate.iterations,
+        total_exponents_checked = aggregate.total_exponents_checked,
+        total_comparisons = aggregate.total_comparisons,
+        fast_path_used_count = aggregate.fast_path_used_count,
+        total_shift_bits = aggregate.total_shift_bits,
+        total_power_bits = aggregate.total_power_bits,
+        total_delta_bits = aggregate.total_delta_bits,
+        total_delta_base10_digits = aggregate.total_delta_base10_digits,
+        total_delta_base2_digits = aggregate.total_delta_base2_digits,
+        final_delta_bits = aggregate.final_delta_bits,
+        final_delta_base10_digits = aggregate.final_delta_base10_digits,
+        final_delta_base2_digits = aggregate.final_delta_base2_digits,
+        coverage_percent = %aggregate.coverage_percent,
+        percent_delta = %aggregate.percent_delta,
+        exact_coverage = aggregate.exact_coverage,
+        estimate_bytes = aggregate.estimate_bytes,
+        estimate_bytes_human = %aggregate.estimate_bytes_human,
+        value_bytes = aggregate.value_bytes,
+        value_bytes_human = %aggregate.value_bytes_human,
+        delta_bytes = aggregate.delta_bytes,
+        delta_bytes_human = %aggregate.delta_bytes_human,
+        approx_bytes = aggregate.approx_bytes,
+        approx_bytes_human = %aggregate.approx_bytes_human,
+        cache_hit = true,
+        "near-power aggregate complete"
+    );
 }
 
 fn run_estimate_any_factor(
@@ -2509,6 +3064,7 @@ mod tests {
                 no_overshoot,
                 prime_rounds,
                 no_log_estimate,
+                cache,
             } => {
                 assert!(base_input.is_none());
                 assert_eq!(base_number, Some("10".to_string()));
@@ -2521,6 +3077,7 @@ mod tests {
                 assert!(!no_overshoot);
                 assert!(!prime_rounds);
                 assert!(!no_log_estimate);
+                assert!(!cache);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2551,6 +3108,7 @@ mod tests {
                 no_overshoot,
                 prime_rounds,
                 no_log_estimate,
+                cache,
             } => {
                 assert_eq!(base_input, Some(PathBuf::from("base.bin")));
                 assert!(base_number.is_none());
@@ -2563,6 +3121,7 @@ mod tests {
                 assert!(!no_overshoot);
                 assert!(!prime_rounds);
                 assert!(!no_log_estimate);
+                assert!(!cache);
             }
             _ => panic!("expected near-power command"),
         }
@@ -2855,6 +3414,8 @@ mod tests {
                 compress_scheme: _,
                 no_overshoot: _,
                 prime_rounds: _,
+                no_log_estimate: _,
+                cache: _,
             } => load_base_biguint(
                 base_input.as_ref(),
                 base_number.as_deref(),
@@ -2891,6 +3452,8 @@ mod tests {
                 compress_scheme: _,
                 no_overshoot: _,
                 prime_rounds: _,
+                no_log_estimate: _,
+                cache: _,
             } => load_base_biguint(
                 base_input.as_ref(),
                 base_number.as_deref(),
