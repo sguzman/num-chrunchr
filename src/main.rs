@@ -1509,11 +1509,7 @@ fn percent_of_value_string(value: &BigUint, power: &BigUint) -> String {
         }
         return "inf".to_string();
     }
-
-    let scale = BigUint::from(1_000_000u64);
-    let factor = BigUint::from(100_000_000u64);
-    let scaled = (power * &factor) / value;
-    format_percent_scaled(scaled, scale, factor)
+    format_percent_ratio(power, value)
 }
 
 fn percent_delta_string(value: &BigUint, delta: &BigUint) -> String {
@@ -1523,11 +1519,7 @@ fn percent_delta_string(value: &BigUint, delta: &BigUint) -> String {
         }
         return "inf".to_string();
     }
-
-    let scale = BigUint::from(1_000_000u64);
-    let factor = BigUint::from(100_000_000u64);
-    let scaled = (delta * &factor) / value;
-    format_percent_scaled(scaled, scale, factor)
+    format_percent_ratio(delta, value)
 }
 
 fn coverage_percent_string(value: &BigUint, remaining: &BigUint) -> String {
@@ -1535,31 +1527,63 @@ fn coverage_percent_string(value: &BigUint, remaining: &BigUint) -> String {
         return "0.000000%".to_string();
     }
     let capped = if remaining > value { value.clone() } else { remaining.clone() };
-    let scale = BigUint::from(1_000_000u64);
-    let factor = BigUint::from(100_000_000u64);
-    let scaled = (&capped * &factor) / value;
-    let coverage_scaled = if scaled > factor {
+    let covered = if capped >= *value {
         BigUint::from(0u8)
     } else {
-        &factor - scaled
+        value.clone() - &capped
     };
-    format_percent_scaled(coverage_scaled, scale, factor)
+    let percent = format_percent_ratio(&covered, value);
+    if !capped.is_zero() && percent == "100.000000%" {
+        let delta = format_percent_ratio(&capped, value);
+        return format!("100.000000% - {delta}");
+    }
+    percent
 }
 
-fn format_percent_scaled(scaled: BigUint, scale: BigUint, _factor: BigUint) -> String {
+fn format_percent_ratio(numer: &BigUint, denom: &BigUint) -> String {
+    if denom.is_zero() {
+        if numer.is_zero() {
+            return "0.000000%".to_string();
+        }
+        return "inf".to_string();
+    }
+    if numer.is_zero() {
+        return "0.000000%".to_string();
+    }
+    let scale = BigUint::from(1_000_000u64);
+    let factor = BigUint::from(100u64);
+    let scaled = (numer * &factor * &scale) / denom;
+    if scaled.is_zero() {
+        return format_percent_scientific(numer, denom);
+    }
     let integer = &scaled / &scale;
     let frac = &scaled % &scale;
     let frac_u64 = frac.to_u64().unwrap_or(0);
-    if integer.is_zero() && frac_u64 < 10 {
-        // Use scientific notation for extremely small percentages (< 0.000010%).
-        let denom = match frac_u64 {
-            0 => 1_000_000u64,
-            _ => 1_000_000u64,
-        };
-        let value = (frac_u64 as f64) / (denom as f64);
-        return format!("{value:.3e}%");
-    }
     format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
+}
+
+fn format_percent_scientific(numer: &BigUint, denom: &BigUint) -> String {
+    if numer.is_zero() || denom.is_zero() {
+        return "0.000000%".to_string();
+    }
+    let ln_n = match ln_biguint(numer) {
+        Ok(value) => value,
+        Err(_) => return "0.000000%".to_string(),
+    };
+    let ln_d = match ln_biguint(denom) {
+        Ok(value) => value,
+        Err(_) => return "0.000000%".to_string(),
+    };
+    let log10 = (ln_n - ln_d) / std::f64::consts::LN_10 + 2.0;
+    if !log10.is_finite() {
+        return "0.000000%".to_string();
+    }
+    let exponent = log10.floor();
+    let mantissa = 10f64.powf(log10 - exponent);
+    format!("{mantissa:.3}e{exp}%",
+        mantissa = mantissa,
+        exp = exponent as i32
+    )
 }
 
 fn bytes_from_bits_stats(bit_len: u64) -> (u64, String) {
