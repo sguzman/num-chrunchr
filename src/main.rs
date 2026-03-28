@@ -434,8 +434,10 @@ fn main() -> Result<()> {
             let final_delta_base2_digits = iter_result.final_delta.bits().max(1);
             let base_mode = if prime_rounds { "prime_rounds" } else { "fixed_base" };
             let base_bits = if prime_rounds { None } else { Some(iter_result.base_bits) };
-            let (coverage_bytes, coverage_bytes_human) =
-                coverage_bytes_stats(value.bits(), iter_result.final_delta.bits());
+            let (covered_bytes, covered_bytes_human) =
+                covered_bytes_stats(value.bits(), iter_result.final_delta.bits());
+            let (estimate_bytes, estimate_bytes_human) =
+                bytes_from_bits_stats(iter_result.total_power.bits());
             info!(
                 base_bits = ?base_bits,
                 base_mode,
@@ -458,8 +460,10 @@ fn main() -> Result<()> {
                 coverage_percent = %coverage_percent,
                 percent_delta = %percent_delta,
                 exact_coverage,
-                coverage_bytes,
-                coverage_bytes_human = %coverage_bytes_human,
+                covered_bytes,
+                covered_bytes_human = %covered_bytes_human,
+                estimate_bytes,
+                estimate_bytes_human = %estimate_bytes_human,
                 "near-power aggregate complete"
             );
         }
@@ -1008,8 +1012,10 @@ fn run_near_power_iterations(
         let power_percent = percent_of_value_string(&remaining, &result.power);
         let percent_delta = percent_delta_string(&remaining, &result.delta);
         let cumulative_coverage_percent = coverage_percent_string(value, &result.delta);
-        let (coverage_bytes, coverage_bytes_human) =
-            coverage_bytes_stats(value.bits(), result.delta.bits());
+        let (covered_bytes, covered_bytes_human) =
+            covered_bytes_stats(value.bits(), result.delta.bits());
+        let (estimate_bytes, estimate_bytes_human) =
+            bytes_from_bits_stats(result.power.bits());
         let power_over = result.power >= remaining;
         info!(
             iteration = idx,
@@ -1030,8 +1036,10 @@ fn run_near_power_iterations(
             percent_delta = %percent_delta,
             power_percent = %power_percent,
             cumulative_coverage_percent = %cumulative_coverage_percent,
-            coverage_bytes,
-            coverage_bytes_human = %coverage_bytes_human,
+            covered_bytes,
+            covered_bytes_human = %covered_bytes_human,
+            estimate_bytes,
+            estimate_bytes_human = %estimate_bytes_human,
             "near-power iteration complete"
         );
 
@@ -1407,12 +1415,18 @@ fn format_percent_scaled(scaled: BigUint, scale: BigUint, _factor: BigUint) -> S
     format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
 }
 
-fn coverage_bytes_stats(value_bits: u64, delta_bits: u64) -> (u64, String) {
+fn covered_bytes_stats(value_bits: u64, delta_bits: u64) -> (u64, String) {
     let total_bytes = (value_bits + 7) / 8;
     let remaining_bytes = (delta_bits + 7) / 8;
     let covered_bytes = total_bytes.saturating_sub(remaining_bytes);
     let human = format_bytes_human(covered_bytes);
     (covered_bytes, human)
+}
+
+fn bytes_from_bits_stats(bit_len: u64) -> (u64, String) {
+    let bytes = (bit_len + 7) / 8;
+    let human = format_bytes_human(bytes);
+    (bytes, human)
 }
 
 fn format_bytes_human(bytes: u64) -> String {
