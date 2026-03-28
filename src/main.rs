@@ -1416,7 +1416,7 @@ fn coverage_bytes_stats(value_bits: u64, delta_bits: u64) -> (u64, String) {
 }
 
 fn format_bytes_human(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit_idx = 0usize;
     while value >= 1000.0 && unit_idx < UNITS.len() - 1 {
