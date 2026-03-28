@@ -434,6 +434,8 @@ fn main() -> Result<()> {
             let final_delta_base2_digits = iter_result.final_delta.bits().max(1);
             let base_mode = if prime_rounds { "prime_rounds" } else { "fixed_base" };
             let base_bits = if prime_rounds { None } else { Some(iter_result.base_bits) };
+            let (coverage_bytes, coverage_bytes_human) =
+                coverage_bytes_stats(value.bits(), iter_result.final_delta.bits());
             info!(
                 base_bits = ?base_bits,
                 base_mode,
@@ -456,6 +458,8 @@ fn main() -> Result<()> {
                 coverage_percent = %coverage_percent,
                 percent_delta = %percent_delta,
                 exact_coverage,
+                coverage_bytes,
+                coverage_bytes_human = %coverage_bytes_human,
                 "near-power aggregate complete"
             );
         }
@@ -1004,6 +1008,8 @@ fn run_near_power_iterations(
         let power_percent = percent_of_value_string(&remaining, &result.power);
         let percent_delta = percent_delta_string(&remaining, &result.delta);
         let cumulative_coverage_percent = coverage_percent_string(value, &result.delta);
+        let (coverage_bytes, coverage_bytes_human) =
+            coverage_bytes_stats(value.bits(), result.delta.bits());
         let power_over = result.power >= remaining;
         info!(
             iteration = idx,
@@ -1024,6 +1030,8 @@ fn run_near_power_iterations(
             percent_delta = %percent_delta,
             power_percent = %power_percent,
             cumulative_coverage_percent = %cumulative_coverage_percent,
+            coverage_bytes,
+            coverage_bytes_human = %coverage_bytes_human,
             "near-power iteration complete"
         );
 
@@ -1397,6 +1405,29 @@ fn format_percent_scaled(scaled: BigUint, scale: BigUint, _factor: BigUint) -> S
         return format!("{value:.3e}%");
     }
     format!("{}.{:06}%", integer.to_str_radix(10), frac_u64)
+}
+
+fn coverage_bytes_stats(value_bits: u64, delta_bits: u64) -> (u64, String) {
+    let total_bytes = (value_bits + 7) / 8;
+    let remaining_bytes = (delta_bits + 7) / 8;
+    let covered_bytes = total_bytes.saturating_sub(remaining_bytes);
+    let human = format_bytes_human(covered_bytes);
+    (covered_bytes, human)
+}
+
+fn format_bytes_human(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut value = bytes as f64;
+    let mut unit_idx = 0usize;
+    while value >= 1000.0 && unit_idx < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit_idx += 1;
+    }
+    if unit_idx == 0 {
+        format!("{bytes}B")
+    } else {
+        format!("{value:.2}{}", UNITS[unit_idx])
+    }
 }
 
 fn floor_log_biguint(
