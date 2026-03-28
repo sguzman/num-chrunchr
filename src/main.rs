@@ -695,19 +695,19 @@ fn log_biguint_base(value: &BigUint, base: f64) -> Result<f64> {
 }
 
 struct NearPowerResult {
-    exponent: u32,
+    exponent: u64,
     power: BigUint,
     delta: BigUint,
     exponents_checked: u64,
     comparisons: u64,
     fast_path: bool,
-    power_of_two_m: Option<u32>,
-    k_floor: Option<u32>,
+    power_of_two_m: Option<u64>,
+    k_floor: Option<u64>,
     shift_bits_used: u64,
 }
 
 struct NearPowerIterations {
-    exponents: Vec<u32>,
+    exponents: Vec<u64>,
     iterations: u32,
     total_power: BigUint,
     total_delta: BigUint,
@@ -776,7 +776,7 @@ fn parse_decimal_biguint(text: &str) -> Result<BigUint> {
         .ok_or_else(|| anyhow::anyhow!("failed to parse base number"))
 }
 
-fn power_of_two_base_exponent(base: &BigUint) -> Option<u32> {
+fn power_of_two_base_exponent(base: &BigUint) -> Option<u64> {
     if base.is_zero() {
         return None;
     }
@@ -791,9 +791,7 @@ fn power_of_two_base_exponent(base: &BigUint) -> Option<u32> {
     let base_minus_one = base - &one;
     if (base & base_minus_one).is_zero() {
         let exp = base_bits.saturating_sub(1);
-        if exp <= u32::MAX as u64 {
-            return Some(exp as u32);
-        }
+        return Some(exp);
     }
     None
 }
@@ -857,16 +855,13 @@ fn nearest_power_exponent(
 
     if let Some(m) = power_of_two_base_exponent(base) {
         let value_bits = value.bits();
-        let m_u64 = m as u64;
+        let m_u64 = m;
         let k_floor_u64 = if value_bits <= 1 {
             0u64
         } else {
             (value_bits - 1) / m_u64
         };
-        if k_floor_u64 > u32::MAX as u64 {
-            bail!("exponent exceeds u32::MAX; base too small for this input");
-        }
-        let k_floor = k_floor_u64 as u32;
+        let k_floor = k_floor_u64;
         let shift_floor = m_u64.saturating_mul(k_floor_u64);
         if shift_floor > usize::MAX as u64 {
             bail!("shift exceeds addressable size for power-of-two fast path");
@@ -889,7 +884,7 @@ fn nearest_power_exponent(
             return Ok(best);
         }
 
-        if k_floor < u32::MAX {
+        if k_floor < u64::MAX {
             let k_hi = k_floor + 1;
             let shift_hi = m_u64.saturating_mul(k_hi as u64);
             if shift_hi > usize::MAX as u64 {
@@ -931,7 +926,7 @@ fn nearest_power_exponent(
     }
 
     let (floor, checked) = floor_log_biguint(base, value, no_log_estimate)?;
-    let power_floor = base.pow(floor);
+    let power_floor = pow_biguint(base, floor);
     let (delta_floor, delta_floor_exact) = abs_diff_counted(value, &power_floor);
     let mut best = NearPowerResult {
         exponent: floor,
@@ -949,9 +944,9 @@ fn nearest_power_exponent(
         return Ok(best);
     }
 
-    if floor < u32::MAX {
+    if floor < u64::MAX {
         let hi = floor + 1;
-        let power_hi = base.pow(hi);
+        let power_hi = pow_biguint(base, hi);
         if no_overshoot && power_hi > *value {
             return Ok(best);
         }
@@ -1140,14 +1135,14 @@ fn run_near_power_iterations_with_bases(
     })
 }
 
-fn compress_sequence_a(exponents: &[u32], scheme: CompressionScheme) -> CompressionResult {
+fn compress_sequence_a(exponents: &[u64], scheme: CompressionScheme) -> CompressionResult {
     let exps: Vec<i128> = exponents.iter().map(|&e| e as i128).collect();
     let base = choose_base_for_scheme(&exps, scheme);
     let deltas: Vec<i128> = exps.iter().map(|&e| e - base).collect();
     compression_metrics(scheme, base, deltas)
 }
 
-fn compress_sequence_b(exponents: &[u32], scheme: CompressionScheme) -> CompressionResult {
+fn compress_sequence_b(exponents: &[u64], scheme: CompressionScheme) -> CompressionResult {
     let exps: Vec<i128> = exponents.iter().map(|&e| e as i128).collect();
     let base = exps.first().copied().unwrap_or(0);
     let mut deltas = Vec::new();
@@ -1408,7 +1403,7 @@ fn floor_log_biguint(
     base: &BigUint,
     value: &BigUint,
     no_log_estimate: bool,
-) -> Result<(u32, u64)> {
+) -> Result<(u64, u64)> {
     if value.is_zero() {
         return Ok((0, 1));
     }
@@ -1427,13 +1422,11 @@ fn floor_log_biguint(
     } else {
         (value_bits - 1) / (base_bits - 1)
     };
-    if max_k > u32::MAX as u64 {
-        bail!("exponent exceeds u32::MAX; base too small for this input");
-    }
+    // max_k is already u64; larger values are allowed.
 
     if no_log_estimate {
-        let mut lo = 0u32;
-        let mut hi = max_k as u32;
+        let mut lo = 0u64;
+        let mut hi = max_k as u64;
         let mut checked = 0u64;
         while lo < hi {
             let mid = lo + (hi - lo + 1) / 2;
@@ -1460,7 +1453,7 @@ fn floor_log_biguint(
         k_floor_estimate = approx_k,
         "log estimate for floor exponent"
     );
-    let mut k = approx_k.min(max_k as u32);
+    let mut k = approx_k.min(max_k as u64);
 
     // Adjust downward if we overshot.
     let mut guard = 0u32;
@@ -1485,7 +1478,7 @@ fn floor_log_biguint(
     // Adjust upward if we can still increase.
     guard = 0;
     loop {
-        if k == u32::MAX {
+        if k == u64::MAX {
             break;
         }
         let next = k + 1;
@@ -1503,8 +1496,8 @@ fn floor_log_biguint(
 
     // Fallback to binary search if estimate was too far off.
     if guard > 6 {
-        let mut lo = 0u32;
-        let mut hi = max_k as u32;
+        let mut lo = 0u64;
+        let mut hi = max_k as u64;
         while lo < hi {
             let mid = lo + (hi - lo + 1) / 2;
             match pow_cmp(base, mid, value) {
@@ -1524,7 +1517,7 @@ fn floor_log_biguint(
     Ok((k, checked.max(1)))
 }
 
-fn pow_cmp(base: &BigUint, exp: u32, target: &BigUint) -> Ordering {
+fn pow_cmp(base: &BigUint, exp: u64, target: &BigUint) -> Ordering {
     if exp == 0 {
         return BigUint::from(1u8).cmp(target);
     }
@@ -1548,7 +1541,27 @@ fn pow_cmp(base: &BigUint, exp: u32, target: &BigUint) -> Ordering {
     result.cmp(target)
 }
 
-fn estimate_floor_log(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
+fn pow_biguint(base: &BigUint, exp: u64) -> BigUint {
+    if exp == 0 {
+        return BigUint::from(1u8);
+    }
+    let mut result = BigUint::from(1u8);
+    let mut base_pow = base.clone();
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result *= &base_pow;
+        }
+        e >>= 1;
+        if e == 0 {
+            break;
+        }
+        base_pow = &base_pow * &base_pow;
+    }
+    result
+}
+
+fn estimate_floor_log(base: &BigUint, value: &BigUint) -> Result<(u64, u64)> {
     if value.is_zero() {
         return Ok((0, 1));
     }
@@ -1562,10 +1575,7 @@ fn estimate_floor_log(base: &BigUint, value: &BigUint) -> Result<(u32, u64)> {
         return Ok((0, 1));
     }
     let k_u64 = k as u64;
-    if k_u64 > u32::MAX as u64 {
-        bail!("exponent exceeds u32::MAX; base too small for this input");
-    }
-    Ok((k_u64 as u32, 1))
+    Ok((k_u64, 1))
 }
 
 fn ln_biguint(value: &BigUint) -> Result<f64> {
@@ -2528,7 +2538,7 @@ mod tests {
         let base = BigUint::from(2u8);
         let value = BigUint::from(6u8);
         let result = run_near_power_iterations(&base, &value, 5, false, false).unwrap();
-        assert_eq!(result.exponents, vec![2, 1]);
+        assert_eq!(result.exponents, vec![2u64, 1]);
         assert_eq!(result.iterations, 2);
         assert_eq!(result.total_power, BigUint::from(6u8));
         assert_eq!(result.total_delta, BigUint::from(2u8));
@@ -2550,7 +2560,7 @@ mod tests {
         let base = BigUint::from(2u8);
         let value = BigUint::from(44u8); // 0b101100
         let result = run_near_power_iterations(&base, &value, 5, false, false).unwrap();
-        assert_eq!(result.exponents, vec![5, 3, 2]);
+        assert_eq!(result.exponents, vec![5u64, 3, 2]);
         assert_eq!(result.iterations, 3);
         assert_eq!(result.final_delta, BigUint::from(0u8));
     }
@@ -2590,7 +2600,7 @@ mod tests {
 
     #[test]
     fn compress_seq_a_min_total_abs_uses_median() {
-        let exps = vec![10u32, 20, 30];
+        let exps = vec![10u64, 20, 30];
         let result = compress_sequence_a(&exps, CompressionScheme::MinTotalAbs);
         assert_eq!(result.base, 20);
         assert_eq!(result.deltas, vec![-10, 0, 10]);
@@ -2598,7 +2608,7 @@ mod tests {
 
     #[test]
     fn compress_seq_a_min_max_abs_uses_midrange() {
-        let exps = vec![10u32, 25, 40];
+        let exps = vec![10u64, 25, 40];
         let result = compress_sequence_a(&exps, CompressionScheme::MinMaxAbs);
         assert_eq!(result.base, 25);
         assert_eq!(result.max_abs_delta, 15);
@@ -2606,7 +2616,7 @@ mod tests {
 
     #[test]
     fn compress_seq_b_deltas_are_consecutive_diffs() {
-        let exps = vec![10u32, 20, 15];
+        let exps = vec![10u64, 20, 15];
         let result = compress_sequence_b(&exps, CompressionScheme::MinTotalAbs);
         assert_eq!(result.base, 10);
         assert_eq!(result.deltas, vec![10, -5]);
@@ -2620,7 +2630,7 @@ mod tests {
 
     #[test]
     fn compression_output_fields_are_consistent() {
-        let exps = vec![10u32, 20, 30];
+        let exps = vec![10u64, 20, 30];
         let result = compress_sequence_a(&exps, CompressionScheme::MinTotalAbs);
         assert_eq!(result.base, 20);
         assert_eq!(result.deltas, vec![-10, 0, 10]);
