@@ -437,6 +437,15 @@ fn main() -> Result<()> {
             let (estimate_bytes, estimate_bytes_human) =
                 bytes_from_bits_stats(iter_result.total_power.bits());
             let (value_bytes, value_bytes_human) = bytes_from_bits_stats(value.bits());
+            let (delta_bytes, delta_bytes_human) =
+                bytes_from_bits_stats(iter_result.final_delta.bits());
+            let approx_value = if iter_result.final_delta <= value {
+                value.clone() - &iter_result.final_delta
+            } else {
+                BigUint::from(0u8)
+            };
+            let (approx_bytes, approx_bytes_human) =
+                bytes_from_bits_stats(approx_value.bits());
             info!(
                 base_bits = ?base_bits,
                 base_mode,
@@ -463,6 +472,10 @@ fn main() -> Result<()> {
                 estimate_bytes_human = %estimate_bytes_human,
                 value_bytes,
                 value_bytes_human = %value_bytes_human,
+                delta_bytes,
+                delta_bytes_human = %delta_bytes_human,
+                approx_bytes,
+                approx_bytes_human = %approx_bytes_human,
                 "near-power aggregate complete"
             );
         }
@@ -1014,6 +1027,7 @@ fn run_near_power_iterations(
         let (estimate_bytes, estimate_bytes_human) =
             bytes_from_bits_stats(result.power.bits());
         let (value_bytes, value_bytes_human) = bytes_from_bits_stats(remaining.bits());
+        let (delta_bytes, delta_bytes_human) = bytes_from_bits_stats(result.delta.bits());
         let power_over = result.power >= remaining;
         info!(
             iteration = idx,
@@ -1038,6 +1052,8 @@ fn run_near_power_iterations(
             estimate_bytes_human = %estimate_bytes_human,
             value_bytes,
             value_bytes_human = %value_bytes_human,
+            delta_bytes,
+            delta_bytes_human = %delta_bytes_human,
             "near-power iteration complete"
         );
 
